@@ -1,0 +1,21 @@
+[package]
+name = "flicker"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# The Async Runtime (Go's scheduler equivalent)
+tokio = { version = "1", features = ["full"] }
+
+# Serialization (JSON/YAML parsing)
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Error handling (Clean error propagation)
+anyhow = "1.0"
+
+# Async Traits (Rust traits normally can't be async, this macro fixes that)
+async-trait = "0.1"
+
+# HTTP Client (For Vector)
+reqwest = { version = "0.11", features = ["json"] }
