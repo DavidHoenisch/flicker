@@ -1,0 +1,12 @@
+# Flicker Configuration
+# Default configuration file
+
+log_files:
+  # Example: Ship application logs to HTTP endpoint
+  - path: "/var/log/myapp/app.log"
+    polling_frequency_ms: 250     # Poll every 250ms
+    buffer_size: 100              # Flush every 100 lines
+    flush_interval_ms: 30000      # OR flush every 30 seconds
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"

@@ -1,75 +1,115 @@
 mod config;
-mod destination;
+mod destinations;
+mod tailer;
 
 use crate::config::Config;
-use crate::destination::{LogEntry, create_destination};
-use std::time::Duration;
+use crate::destinations::{LogEntry, create_destination};
+use crate::tailer::LogTailer;
+use clap::Parser;
+use std::time::{Duration, Instant};
 use tokio::time;
 
-// #[tokio::main] starts the async runtime (like Go's scheduler)
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "flicker.yaml")]
+    config: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Load Config
-    // In a real app, use clap to parse CLI args for the config path
-    let cfg = Config::load("flicker.yaml").unwrap_or_else(|_| {
-        // Fallback for demo purposes if file missing
-        Config {
-            polling_frequency_ms: 1000,
-            log_paths: vec!["/var/log/syslog".to_string()],
-            destination: config::DestinationConfig {
-                endpoint: "http://localhost:8080".to_string(),
-                api_key: None,
-            },
-        }
-    });
+    let args = Args::parse();
+    let cfg = Config::load(&args.config)?;
 
-    println!("Starting Flicker...");
+    println!(
+        "Starting Flicker with {} log file(s)...",
+        cfg.log_files.len()
+    );
 
-    // 2. Create the Channel
-    // tx = transmitter (send-only channel end)
-    // rx = receiver (receive-only channel end)
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<LogEntry>(100);
+    let mut handles = vec![];
 
-    // 3. Spawn the File Watcher (Producer)
-    // This is like `go func() { ... }`
-    let paths = cfg.log_paths.clone();
-    let freq = cfg.polling_frequency_ms;
+    for log_file in cfg.log_files {
+        let path = log_file.path.clone();
+        let freq = log_file.polling_frequency_ms;
+        let buffer_size = log_file.buffer_size;
+        let flush_interval = Duration::from_millis(log_file.flush_interval_ms);
+        let dest_type = log_file.destination.dest_type.clone();
 
-    tokio::spawn(async move {
-        // "move" keyword forces the closure to take ownership of `paths` and `tx`
-        // so they exist inside this new thread.
-        let mut interval = time::interval(Duration::from_millis(freq));
+        // Create destination from config
+        let dest = match create_destination(&log_file.destination) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Failed to create destination for {}: {}", path, e);
+                continue; // Skip this file and continue with others
+            }
+        };
 
-        loop {
-            interval.tick().await;
+        let handle = tokio::spawn(async move {
+            let mut tailer = LogTailer::new();
+            let mut interval = time::interval(Duration::from_millis(freq));
 
-            // FAKE INGESTION: Simulating reading lines from files
-            for path in &paths {
-                let entry = LogEntry {
-                    path: path.clone(),
-                    line: format!("Log event at {:?}", std::time::SystemTime::now()),
-                };
+            let mut buffer: Vec<LogEntry> = Vec::with_capacity(buffer_size);
+            let mut last_flush = Instant::now();
 
-                // Send to channel.
-                if let Err(e) = tx.send(entry).await {
-                    eprintln!("Receiver dropped: {}", e);
-                    return; // Exit task
+            println!(
+                "Tailing {} every {}ms (buffer: {} lines, flush: {}ms) -> {} destination",
+                path, freq, buffer_size, log_file.flush_interval_ms, dest_type
+            );
+
+            loop {
+                interval.tick().await;
+
+                // Poll this file for new lines
+                match tailer.poll(&path) {
+                    Ok(lines) => {
+                        // Add new lines to buffer
+                        for line in lines {
+                            buffer.push(LogEntry {
+                                path: path.clone(),
+                                line,
+                            });
+                        }
+
+                        let buffer_full = buffer.len() >= buffer_size;
+                        let time_elapsed = last_flush.elapsed() >= flush_interval;
+
+                        if buffer_full || (time_elapsed && !buffer.is_empty()) {
+                            let reason = if buffer_full {
+                                "buffer full"
+                            } else {
+                                "time elapsed"
+                            };
+                            println!(
+                                "Flushing {} entries from {} ({})",
+                                buffer.len(),
+                                path,
+                                reason
+                            );
+
+                            // Send batch to destination
+                            if let Err(e) = dest.send_batch(buffer.clone()).await {
+                                eprintln!("Failed to ship batch from {}: {}", path, e);
+                            }
+
+                            // Clear buffer and reset timer
+                            buffer.clear();
+                            last_flush = Instant::now();
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error polling {}: {}", path, e);
+                        // Continue polling, don't crash
+                    }
                 }
             }
-        }
-    });
+        });
 
-    // 4. The Destination Handler (Consumer)
-    // We create the concrete implementation but hold it as a Trait Object
-    let dest = create_destination(&cfg.destination.endpoint);
+        handles.push(handle);
+    }
 
-    // Loop over messages as they arrive
-    while let Some(entry) = rx.recv().await {
-        // Processing Logic (Filter/Regex) would go here
-
-        // Ship it
-        if let Err(e) = dest.send(entry).await {
-            eprintln!("Failed to ship log: {}", e);
+    for handle in handles {
+        if let Err(e) = handle.await {
+            eprintln!("Task failed: {}", e);
         }
     }
 

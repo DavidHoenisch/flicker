@@ -10,6 +10,7 @@ tokio = { version = "1", features = ["full"] }
 # Serialization (JSON/YAML parsing)
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+serde_json = "1.0"
 
 # Error handling (Clean error propagation)
 anyhow = "1.0"
@@ -17,5 +18,14 @@ anyhow = "1.0"
 # Async Traits (Rust traits normally can't be async, this macro fixes that)
 async-trait = "0.1"
 
-# HTTP Client (For Vector)
+# HTTP Client (For HTTP/Elasticsearch destinations)
 reqwest = { version = "0.11", features = ["json"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Date/time handling (For Elasticsearch timestamps)
+chrono = "0.4"
+
+# System hostname (For Syslog)
+hostname = "0.4"

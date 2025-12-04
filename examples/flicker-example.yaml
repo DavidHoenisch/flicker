@@ -1,0 +1,19 @@
+log_files:
+  # Each log file is configured independently with its own
+  # polling frequency, buffering, and destination
+
+  - path: "/var/log/syslog"
+    polling_frequency_ms: 250
+    buffer_size: 100          # Flush when buffer reaches 100 lines
+    flush_interval_ms: 30000  # OR flush after 30 seconds (whichever comes first)
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+      api_key: "sec_12345_xyz"
+
+  - path: "/var/log/auth.log"
+    polling_frequency_ms: 500  # Poll less frequently
+    buffer_size: 50            # Smaller buffer for less active logs
+    flush_interval_ms: 60000   # Flush after 60 seconds if buffer not full
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+      api_key: "sec_12345_xyz"

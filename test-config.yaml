@@ -1,0 +1,43 @@
+# Test configuration for local testing with test-receiver.py
+
+log_files:
+  # Five test files with HTTP destination
+  - path: "./test1.log"
+    polling_frequency_ms: 500
+    buffer_size: 5
+    flush_interval_ms: 10000
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test2.log"
+    polling_frequency_ms: 600
+    buffer_size: 7
+    flush_interval_ms: 12000
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test3.log"
+    polling_frequency_ms: 400
+    buffer_size: 3
+    flush_interval_ms: 8000
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test4.log"
+    polling_frequency_ms: 700
+    buffer_size: 10
+    flush_interval_ms: 15000
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test5.log"
+    polling_frequency_ms: 550
+    buffer_size: 6
+    flush_interval_ms: 11000
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"

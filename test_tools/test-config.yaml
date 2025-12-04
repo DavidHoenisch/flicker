@@ -1,0 +1,38 @@
+log_files:
+  # Multiple test log files with different configurations
+  # This demonstrates independent tailing of multiple files
+
+  - path: "./test1.log"
+    polling_frequency_ms: 500
+    buffer_size: 5            # Flush every 5 lines
+    flush_interval_ms: 10000  # OR after 10 seconds
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test2.log"
+    polling_frequency_ms: 600
+    buffer_size: 7            # Slightly larger buffer
+    flush_interval_ms: 12000
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test3.log"
+    polling_frequency_ms: 400
+    buffer_size: 3            # Smaller buffer - flushes more often
+    flush_interval_ms: 8000
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test4.log"
+    polling_frequency_ms: 700
+    buffer_size: 10           # Larger buffer
+    flush_interval_ms: 15000
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+
+  - path: "./test5.log"
+    polling_frequency_ms: 550
+    buffer_size: 6
+    flush_interval_ms: 11000
+    destination:
+      endpoint: "http://localhost:8000/ingest"

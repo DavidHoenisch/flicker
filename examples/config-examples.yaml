@@ -1,0 +1,74 @@
+# Flicker Configuration Examples
+# Demonstrates all supported destination types
+
+log_files:
+  # Example 1: HTTP Destination (Vector, custom HTTP endpoints)
+  - path: "/var/log/myapp/app.log"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    destination:
+      type: "http"
+      endpoint: "http://vector:8080/ingest"
+      api_key: "optional_api_key_here"  # Optional
+
+  # Example 2: Syslog Destination via UDP (rsyslog, syslog-ng)
+  - path: "/var/log/myapp/syslog.log"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 15000
+    destination:
+      type: "syslog"
+      host: "syslog-server.local"
+      port: 514          # Default: 514
+      protocol: "udp"    # "udp" or "tcp", default: "udp"
+
+  # Example 3: Syslog Destination via TCP
+  - path: "/var/log/myapp/audit.log"
+    polling_frequency_ms: 1000
+    buffer_size: 25
+    flush_interval_ms: 60000
+    destination:
+      type: "syslog"
+      host: "10.0.1.50"
+      port: 1514
+      protocol: "tcp"
+
+  # Example 4: Elasticsearch Destination
+  - path: "/var/log/myapp/errors.log"
+    polling_frequency_ms: 500
+    buffer_size: 100
+    flush_interval_ms: 30000
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-myapp"
+
+  # Example 5: File Destination (JSONL output)
+  # Useful for debugging, backup, or format conversion
+  - path: "/var/log/myapp/debug.log"
+    polling_frequency_ms: 1000
+    buffer_size: 50
+    flush_interval_ms: 45000
+    destination:
+      type: "file"
+      path: "/backup/logs/debug.jsonl"
+
+  # Example 6: Multiple files to same Elasticsearch cluster, different indices
+  - path: "/var/log/nginx/access.log"
+    polling_frequency_ms: 250
+    buffer_size: 200
+    flush_interval_ms: 10000
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-nginx-access"
+
+  - path: "/var/log/nginx/error.log"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 20000
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-nginx-error"
