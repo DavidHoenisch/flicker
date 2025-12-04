@@ -354,7 +354,7 @@ Contributions welcome! Areas of interest:
 
 ## License
 
-[Your chosen license]
+MIT
 
 ## Acknowledgments
 
