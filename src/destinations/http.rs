@@ -57,7 +57,10 @@ impl Destination for HttpDestination {
             anyhow::bail!("HTTP {} from {}: {}", status, self.endpoint, body);
         }
 
-        println!("[HTTP] Batch sent successfully (HTTP {})", response.status());
+        println!(
+            "[HTTP] Batch sent successfully (HTTP {})",
+            response.status()
+        );
 
         Ok(())
     }

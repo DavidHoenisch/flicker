@@ -13,8 +13,8 @@
 use super::{Destination, LogEntry};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Serialize;
 use chrono::Utc;
+use serde::Serialize;
 
 pub struct ElasticsearchDestination {
     client: reqwest::Client,
@@ -130,12 +130,12 @@ impl Destination for ElasticsearchDestination {
         let response_text = response.text().await?;
         let response_json: serde_json::Value = serde_json::from_str(&response_text)?;
 
-        if let Some(errors) = response_json.get("errors") {
-            if errors.as_bool() == Some(true) {
-                // Some items failed - log details
-                eprintln!("[ELASTICSEARCH] Bulk request had errors: {}", response_text);
-                anyhow::bail!("Elasticsearch bulk request contained errors");
-            }
+        if let Some(errors) = response_json.get("errors")
+            && errors.as_bool() == Some(true)
+        {
+            // Some items failed - log details
+            eprintln!("[ELASTICSEARCH] Bulk request had errors: {}", response_text);
+            anyhow::bail!("Elasticsearch bulk request contained errors");
         }
 
         println!("[ELASTICSEARCH] Batch indexed successfully");

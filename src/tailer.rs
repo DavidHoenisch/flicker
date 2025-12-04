@@ -6,8 +6,8 @@ use std::path::PathBuf;
 /// Tracks state for a single file being tailed
 struct FileState {
     reader: BufReader<File>,
-    position: u64,       // Current byte offset in file
-    inode: u64,          // To detect file rotation
+    position: u64, // Current byte offset in file
+    inode: u64,    // To detect file rotation
 }
 
 /// Manages tailing multiple log files
@@ -91,7 +91,6 @@ impl LogTailer {
 
             // Update position after reading
             state.position = state.reader.stream_position()?;
-
         } else {
             // First time seeing this file, open it
             let file = File::open(&path_buf)?;

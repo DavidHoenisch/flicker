@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let handle = tokio::spawn(async move {
+        let handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             let mut tailer = LogTailer::new();
             let mut interval = time::interval(Duration::from_millis(freq));
 
@@ -126,14 +126,18 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            #[allow(unreachable_code)]
+            Ok(())
         });
 
         handles.push(handle);
     }
 
     for handle in handles {
-        if let Err(e) = handle.await {
-            eprintln!("Task failed: {}", e);
+        // Tasks run infinite loops and never return naturally
+        match handle.await {
+            Ok(_) => {} // Task completed (unreachable)
+            Err(e) => eprintln!("Task panicked: {}", e),
         }
     }
 

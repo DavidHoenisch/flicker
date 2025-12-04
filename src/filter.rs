@@ -58,7 +58,10 @@ impl LogFilter {
 
         // Stage 2: Check exclude patterns (blacklist)
         if !self.exclude_patterns.is_empty() {
-            let matches_any = self.exclude_patterns.iter().any(|regex| regex.is_match(line));
+            let matches_any = self
+                .exclude_patterns
+                .iter()
+                .any(|regex| regex.is_match(line));
             if matches_any {
                 return false; // Matches blacklist, skip
             }
@@ -88,10 +91,7 @@ mod tests {
 
     #[test]
     fn test_match_only() {
-        let filter = LogFilter::new(
-            vec!["ERROR".to_string(), "WARN".to_string()],
-            vec![],
-        ).unwrap();
+        let filter = LogFilter::new(vec!["ERROR".to_string(), "WARN".to_string()], vec![]).unwrap();
 
         assert!(!filter.is_passthrough());
         assert!(filter.should_ship("ERROR: something bad"));
@@ -102,10 +102,8 @@ mod tests {
 
     #[test]
     fn test_exclude_only() {
-        let filter = LogFilter::new(
-            vec![],
-            vec!["DEBUG".to_string(), "TRACE".to_string()],
-        ).unwrap();
+        let filter =
+            LogFilter::new(vec![], vec!["DEBUG".to_string(), "TRACE".to_string()]).unwrap();
 
         assert!(!filter.is_passthrough());
         assert!(filter.should_ship("ERROR: something bad"));
@@ -120,7 +118,8 @@ mod tests {
         let filter = LogFilter::new(
             vec!["ERROR".to_string(), "WARN".to_string()],
             vec!["ignore".to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(filter.should_ship("ERROR: something bad"));
         assert!(filter.should_ship("WARN: watch out"));
@@ -132,10 +131,7 @@ mod tests {
     #[test]
     fn test_regex_patterns() {
         // Match lines starting with timestamp pattern
-        let filter = LogFilter::new(
-            vec![r"^\[\d{4}-\d{2}-\d{2}".to_string()],
-            vec![],
-        ).unwrap();
+        let filter = LogFilter::new(vec![r"^\[\d{4}-\d{2}-\d{2}".to_string()], vec![]).unwrap();
 
         assert!(filter.should_ship("[2025-12-03 14:23:45] Log message"));
         assert!(!filter.should_ship("Log message without timestamp"));

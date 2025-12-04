@@ -31,10 +31,10 @@ pub struct LogFileConfig {
     // exclude_on: Skip lines matching any of these patterns (blacklist)
     // Logic: If match_on is non-empty, line must match. Then check exclude_on.
     #[serde(default)]
-    pub match_on: Vec<String>,    // List of regex patterns to match (empty = match all)
+    pub match_on: Vec<String>, // List of regex patterns to match (empty = match all)
 
     #[serde(default)]
-    pub exclude_on: Vec<String>,  // List of regex patterns to exclude (empty = exclude none)
+    pub exclude_on: Vec<String>, // List of regex patterns to exclude (empty = exclude none)
 }
 
 // Default: Flush every 100 lines
@@ -58,19 +58,20 @@ pub struct DestinationConfig {
 
     // HTTP destination fields
     pub endpoint: Option<String>, // HTTP endpoint URL
-    pub api_key: Option<String>,   // Optional API key for auth
+    #[allow(dead_code)]
+    pub api_key: Option<String>, // Optional API key for auth
 
     // Syslog destination fields
-    pub host: Option<String>,      // Syslog server hostname
-    pub port: Option<u16>,         // Syslog server port (default: 514)
-    pub protocol: Option<String>,  // "udp" or "tcp" (default: "udp")
+    pub host: Option<String>,     // Syslog server hostname
+    pub port: Option<u16>,        // Syslog server port (default: 514)
+    pub protocol: Option<String>, // "udp" or "tcp" (default: "udp")
 
     // Elasticsearch destination fields
-    pub url: Option<String>,       // Elasticsearch URL
-    pub index: Option<String>,     // Index name
+    pub url: Option<String>,   // Elasticsearch URL
+    pub index: Option<String>, // Index name
 
     // File destination fields
-    pub path: Option<String>,      // Output file path
+    pub path: Option<String>, // Output file path
 }
 
 impl Config {

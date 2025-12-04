@@ -10,10 +10,10 @@
 use super::{Destination, LogEntry};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::net::{ToSocketAddrs, UdpSocket};
+use chrono::Local;
 use std::io::Write;
 use std::net::TcpStream;
-use chrono::Local;
+use std::net::{ToSocketAddrs, UdpSocket};
 
 pub struct SyslogDestination {
     host: String,
@@ -63,6 +63,7 @@ impl SyslogDestination {
         )
     }
 
+    #[allow(dead_code)]
     fn send_udp(&self, messages: &[String]) -> Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         let addr = format!("{}:{}", self.host, self.port)
@@ -77,6 +78,7 @@ impl SyslogDestination {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn send_tcp(&self, messages: &[String]) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
         let mut stream = TcpStream::connect(&addr)?;

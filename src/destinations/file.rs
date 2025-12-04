@@ -37,9 +37,7 @@ impl FileDestination {
             .append(true)
             .open(&path_buf)?;
 
-        Ok(Self {
-            path: path_buf,
-        })
+        Ok(Self { path: path_buf })
     }
 }
 
@@ -72,10 +70,7 @@ impl Destination for FileDestination {
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             // Open file in append mode
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)?;
+            let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
             // Write all entries
             for json in entries_json {
