@@ -62,3 +62,139 @@ pub fn create_destination(config: &crate::config::DestinationConfig) -> Result<B
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DestinationConfig;
+
+    #[test]
+    fn test_create_http_destination() {
+        let config = DestinationConfig {
+            dest_type: "http".to_string(),
+            endpoint: Some("http://localhost:8000".to_string()),
+            api_key: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_http_destination_missing_endpoint() {
+        let config = DestinationConfig {
+            dest_type: "http".to_string(),
+            endpoint: None,
+            api_key: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("endpoint"));
+    }
+
+    #[test]
+    fn test_create_syslog_destination() {
+        let config = DestinationConfig {
+            dest_type: "syslog".to_string(),
+            endpoint: None,
+            api_key: None,
+            host: Some("localhost".to_string()),
+            port: Some(514),
+            protocol: Some("udp".to_string()),
+            url: None,
+            index: None,
+            path: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_syslog_destination_defaults() {
+        let config = DestinationConfig {
+            dest_type: "syslog".to_string(),
+            endpoint: None,
+            api_key: None,
+            host: Some("syslog.local".to_string()),
+            port: None, // Should default to 514
+            protocol: None, // Should default to "udp"
+            url: None,
+            index: None,
+            path: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_elasticsearch_destination() {
+        let config = DestinationConfig {
+            dest_type: "elasticsearch".to_string(),
+            endpoint: None,
+            api_key: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: Some("http://es:9200".to_string()),
+            index: Some("logs".to_string()),
+            path: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_file_destination() {
+        let config = DestinationConfig {
+            dest_type: "file".to_string(),
+            endpoint: None,
+            api_key: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: Some("/tmp/test-flicker.jsonl".to_string()),
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_unknown_destination_type() {
+        let config = DestinationConfig {
+            dest_type: "unknown".to_string(),
+            endpoint: None,
+            api_key: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("Unknown destination type"));
+    }
+}

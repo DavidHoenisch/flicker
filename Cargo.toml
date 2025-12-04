@@ -29,3 +29,17 @@ chrono = "0.4"
 
 # System hostname (For Syslog)
 hostname = "0.4"
+
+# Regular expressions (For log filtering)
+regex = "1"
+
+[dev-dependencies]
+# Temporary files for testing
+tempfile = "3"
+
+[profile.release]
+opt-level = 's' # Optimize for size
+lto = true      # Link-Time Optimization
+codegen-units = 1 # Minimize parallel compilation units
+strip = true    # Strip debug symbols
+

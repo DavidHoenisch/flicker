@@ -1,0 +1,190 @@
+# Flicker Configuration Examples
+# Demonstrates all supported destination types and filtering options
+
+log_files:
+  # ============================================================
+  # Example 1: HTTP Destination (Vector, custom HTTP endpoints)
+  # ============================================================
+  - path: "/var/log/myapp/app.log"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    destination:
+      type: "http"
+      endpoint: "http://vector:8080/ingest"
+      api_key: "optional_api_key_here"  # Optional
+
+  # ============================================================
+  # Example 2: Syslog Destination via UDP (rsyslog, syslog-ng)
+  # ============================================================
+  - path: "/var/log/myapp/syslog.log"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 15000
+    destination:
+      type: "syslog"
+      host: "syslog-server.local"
+      port: 514          # Default: 514
+      protocol: "udp"    # "udp" or "tcp", default: "udp"
+
+  # ============================================================
+  # Example 3: Elasticsearch Destination
+  # ============================================================
+  - path: "/var/log/myapp/errors.log"
+    polling_frequency_ms: 500
+    buffer_size: 100
+    flush_interval_ms: 30000
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-myapp"
+
+  # ============================================================
+  # Example 4: File Destination (JSONL output)
+  # Useful for debugging, backup, or format conversion
+  # ============================================================
+  - path: "/var/log/myapp/debug.log"
+    polling_frequency_ms: 1000
+    buffer_size: 50
+    flush_interval_ms: 45000
+    destination:
+      type: "file"
+      path: "/backup/logs/debug.jsonl"
+
+  # ============================================================
+  # Example 5: FILTERING - Match Only (Whitelist)
+  # Only ship ERROR and WARN level logs
+  # ============================================================
+  - path: "/var/log/myapp/filtered.log"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    match_on:
+      - "ERROR"
+      - "WARN"
+    destination:
+      type: "http"
+      endpoint: "http://alerts:8080/ingest"
+
+  # ============================================================
+  # Example 6: FILTERING - Exclude Only (Blacklist)
+  # Ship all logs EXCEPT debug and trace
+  # ============================================================
+  - path: "/var/log/myapp/production.log"
+    polling_frequency_ms: 500
+    buffer_size: 100
+    flush_interval_ms: 30000
+    exclude_on:
+      - "DEBUG"
+      - "TRACE"
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-production"
+
+  # ============================================================
+  # Example 7: FILTERING - Both Match and Exclude
+  # Ship ERROR/WARN logs, but exclude test/dev environments
+  # ============================================================
+  - path: "/var/log/myapp/app.log"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    match_on:
+      - "ERROR"
+      - "WARN"
+    exclude_on:
+      - "\\[test\\]"     # Exclude lines containing [test]
+      - "\\[dev\\]"      # Exclude lines containing [dev]
+    destination:
+      type: "syslog"
+      host: "production-syslog.local"
+      protocol: "tcp"
+
+  # ============================================================
+  # Example 8: FILTERING - Advanced Regex Patterns
+  # Match lines with timestamps and specific error codes
+  # ============================================================
+  - path: "/var/log/myapp/errors.log"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 20000
+    match_on:
+      # Match lines starting with timestamp pattern
+      - "^\\[\\d{4}-\\d{2}-\\d{2}"
+      # Match lines containing HTTP 5xx errors
+      - "HTTP [5]\\d{2}"
+      # Match lines with specific error codes
+      - "ERR-[0-9]{4}"
+    exclude_on:
+      # Exclude known ignorable errors
+      - "ERR-1001"  # Known safe error
+      - "timeout.*retry"  # Timeout with retry (handled)
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-critical-errors"
+
+  # ============================================================
+  # Example 9: FILTERING - User Authentication Logs
+  # Extract only successful login events
+  # ============================================================
+  - path: "/var/log/auth.log"
+    polling_frequency_ms: 1000
+    buffer_size: 50
+    flush_interval_ms: 60000
+    match_on:
+      - "session opened for user"
+      - "Accepted password for"
+      - "Accepted publickey for"
+    exclude_on:
+      - "invalid user"
+      - "Failed password"
+    destination:
+      type: "syslog"
+      host: "security-audit.local"
+      port: 514
+      protocol: "tcp"
+
+  # ============================================================
+  # Example 10: FILTERING - Application Performance Logs
+  # Ship only slow queries (>1000ms)
+  # ============================================================
+  - path: "/var/log/database/queries.log"
+    polling_frequency_ms: 500
+    buffer_size: 25
+    flush_interval_ms: 30000
+    match_on:
+      # Match slow queries (1000ms or more)
+      - "duration: [1-9]\\d{3,}ms"
+      - "slow query"
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-slow-queries"
+
+  # ============================================================
+  # Example 11: Multiple Files, Same Elasticsearch, Different Indices
+  # ============================================================
+  - path: "/var/log/nginx/access.log"
+    polling_frequency_ms: 250
+    buffer_size: 200
+    flush_interval_ms: 10000
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-nginx-access"
+
+  - path: "/var/log/nginx/error.log"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 20000
+    match_on:
+      - "error"
+      - "crit"
+      - "alert"
+      - "emerg"
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-nginx-error"

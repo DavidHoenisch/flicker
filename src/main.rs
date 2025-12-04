@@ -1,9 +1,11 @@
 mod config;
 mod destinations;
+mod filter;
 mod tailer;
 
 use crate::config::Config;
 use crate::destinations::{LogEntry, create_destination};
+use crate::filter::LogFilter;
 use crate::tailer::LogTailer;
 use clap::Parser;
 use std::time::{Duration, Instant};
@@ -44,6 +46,15 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+        // Create filter from config
+        let filter = match LogFilter::new(log_file.match_on.clone(), log_file.exclude_on.clone()) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Failed to create filter for {}: {}", path, e);
+                continue; // Skip this file and continue with others
+            }
+        };
+
         let handle = tokio::spawn(async move {
             let mut tailer = LogTailer::new();
             let mut interval = time::interval(Duration::from_millis(freq));
@@ -51,9 +62,15 @@ async fn main() -> anyhow::Result<()> {
             let mut buffer: Vec<LogEntry> = Vec::with_capacity(buffer_size);
             let mut last_flush = Instant::now();
 
+            let filter_info = if filter.is_passthrough() {
+                "no filters".to_string()
+            } else {
+                "with filters".to_string()
+            };
+
             println!(
-                "Tailing {} every {}ms (buffer: {} lines, flush: {}ms) -> {} destination",
-                path, freq, buffer_size, log_file.flush_interval_ms, dest_type
+                "Tailing {} every {}ms (buffer: {} lines, flush: {}ms, {}) -> {} destination",
+                path, freq, buffer_size, log_file.flush_interval_ms, filter_info, dest_type
             );
 
             loop {
@@ -62,12 +79,19 @@ async fn main() -> anyhow::Result<()> {
                 // Poll this file for new lines
                 match tailer.poll(&path) {
                     Ok(lines) => {
-                        // Add new lines to buffer
+                        // Apply filter and add matching lines to buffer
+                        // DESIGN CHOICE: Filter before buffering
+                        // This keeps buffer size accurate and avoids buffering
+                        // lines that will never be shipped
                         for line in lines {
-                            buffer.push(LogEntry {
-                                path: path.clone(),
-                                line,
-                            });
+                            // Check if line passes filters
+                            if filter.should_ship(&line) {
+                                buffer.push(LogEntry {
+                                    path: path.clone(),
+                                    line,
+                                });
+                            }
+                            // If line doesn't pass filter, it's silently dropped
                         }
 
                         let buffer_full = buffer.len() >= buffer_size;

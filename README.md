@@ -1,10 +1,15 @@
 # Flicker
 
-A lightweight, high-performance log shipping agent written in Rust. Flicker efficiently tails multiple log files and ships them to HTTP endpoints with intelligent buffering.
+A lightweight, high-performance log shipping agent written in Rust. Flicker
+efficiently tails multiple log files and ships them to HTTP endpoints with
+intelligent buffering.
 
 ## Overview
 
-Flicker is designed to be a simple yet powerful log shipper similar to Filebeat or Fluentd, but with a focus on simplicity and performance. It reads log files from disk, buffers entries intelligently, and ships them in batches to configured HTTP destinations.
+Flicker is designed to be a simple yet powerful log shipper similar to Filebeat
+or Fluentd, but with a focus on simplicity and performance. It reads log
+files from disk, buffers entries intelligently, and ships them in batches to
+configured HTTP destinations.
 
 ## Key Features
 
@@ -14,13 +19,22 @@ Each log file is configured independently with its own:
 - Buffer size
 - Flush interval
 - Destination endpoint
+- Regex filters (match/exclude patterns)
+
+### 🔍 Regex-Based Filtering
+Powerful filtering to ship only relevant logs:
+- **match_on**: Whitelist - only ship lines matching at least one pattern
+- **exclude_on**: Blacklist - skip lines matching any pattern
+- Both can be used together for fine-grained control
+- Regexes compiled once at startup for efficiency
 
 ### 📦 Intelligent Buffering
 Dual-trigger buffering system that flushes when **either** condition is met:
 - **Size trigger**: Buffer reaches configured line count (e.g., 100 lines)
 - **Time trigger**: Configured interval elapsed (e.g., 30 seconds)
 
-This ensures high-volume logs flush frequently for low latency, while low-volume logs don't sit in the buffer indefinitely.
+This ensures high-volume logs flush frequently for low latency, while low-volume
+logs don't sit in the buffer indefinitely.
 
 ### 🚀 Concurrent Processing
 - One independent async task per log file
@@ -90,25 +104,37 @@ log_files:
     buffer_size: 100          # Flush every 100 lines
     flush_interval_ms: 30000  # OR flush after 30 seconds
     destination:
+      type: "http"
       endpoint: "http://log-aggregator:8000/ingest"
       api_key: "secret_key_123"
 
-  # Low-volume audit logs
+  # Low-volume audit logs with filtering
   - path: "/var/log/myapp/audit.log"
     polling_frequency_ms: 1000
     buffer_size: 50
     flush_interval_ms: 60000  # Flush after 1 minute
+    # Only ship ERROR and WARN level logs
+    match_on:
+      - "ERROR"
+      - "WARN"
     destination:
+      type: "http"
       endpoint: "http://security-system:9000/audit"
       api_key: "audit_key_456"
 
-  # System logs to different destination
+  # System logs with exclusion filter
   - path: "/var/log/syslog"
     polling_frequency_ms: 500
     buffer_size: 200
     flush_interval_ms: 45000
+    # Ship everything except debug and trace
+    exclude_on:
+      - "DEBUG"
+      - "TRACE"
     destination:
-      endpoint: "http://monitoring:7000/logs"
+      type: "syslog"
+      host: "syslog-server.local"
+      protocol: "udp"
 ```
 
 ### Configuration Parameters
@@ -120,8 +146,10 @@ Array of log file configurations. Each entry supports:
 - **`polling_frequency_ms`** (integer, required): How often to check for new lines (milliseconds)
 - **`buffer_size`** (integer, default: 100): Flush when buffer reaches this many lines
 - **`flush_interval_ms`** (integer, default: 30000): Flush after this many milliseconds
-- **`destination.endpoint`** (string, required): HTTP endpoint to POST log batches
-- **`destination.api_key`** (string, optional): API key for authentication
+- **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
+- **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
+- **`destination.type`** (string, required): Destination type: "http", "syslog", "elasticsearch", or "file"
+- **`destination.*`** (various, required): Destination-specific fields (see config-examples.yaml)
 
 ## Usage
 
