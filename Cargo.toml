@@ -19,7 +19,8 @@ anyhow = "1.0"
 async-trait = "0.1"
 
 # HTTP Client (For HTTP/Elasticsearch destinations)
-reqwest = { version = "0.11", features = ["json"] }
+# Use rustls instead of native-tls (OpenSSL) for easier cross-compilation
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
