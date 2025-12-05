@@ -37,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
         let flush_interval = Duration::from_millis(log_file.flush_interval_ms);
         let dest_type = log_file.destination.dest_type.clone();
 
-        // Create destination from config
         let dest = match create_destination(&log_file.destination) {
             Ok(d) => d,
             Err(e) => {
@@ -46,7 +45,6 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        // Create filter from config
         let filter = match LogFilter::new(log_file.match_on.clone(), log_file.exclude_on.clone()) {
             Ok(f) => f,
             Err(e) => {
@@ -79,19 +77,13 @@ async fn main() -> anyhow::Result<()> {
                 // Poll this file for new lines
                 match tailer.poll(&path) {
                     Ok(lines) => {
-                        // Apply filter and add matching lines to buffer
-                        // DESIGN CHOICE: Filter before buffering
-                        // This keeps buffer size accurate and avoids buffering
-                        // lines that will never be shipped
                         for line in lines {
-                            // Check if line passes filters
                             if filter.should_ship(&line) {
                                 buffer.push(LogEntry {
                                     path: path.clone(),
                                     line,
                                 });
                             }
-                            // If line doesn't pass filter, it's silently dropped
                         }
 
                         let buffer_full = buffer.len() >= buffer_size;
@@ -110,19 +102,16 @@ async fn main() -> anyhow::Result<()> {
                                 reason
                             );
 
-                            // Send batch to destination
                             if let Err(e) = dest.send_batch(buffer.clone()).await {
                                 eprintln!("Failed to ship batch from {}: {}", path, e);
                             }
 
-                            // Clear buffer and reset timer
                             buffer.clear();
                             last_flush = Instant::now();
                         }
                     }
                     Err(e) => {
                         eprintln!("Error polling {}: {}", path, e);
-                        // Continue polling, don't crash
                     }
                 }
             }
@@ -134,7 +123,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     for handle in handles {
-        // Tasks run infinite loops and never return naturally
         match handle.await {
             Ok(_) => {} // Task completed (unreachable)
             Err(e) => eprintln!("Task panicked: {}", e),

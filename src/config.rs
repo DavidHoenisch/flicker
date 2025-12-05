@@ -1,10 +1,6 @@
 use serde::Deserialize;
 use std::fs;
 
-// DESIGN CHOICE: Per-file configuration
-// Each log file is an independent unit with its own polling frequency
-// and destination. This allows maximum flexibility: different files
-// can ship to different destinations at different rates.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub log_files: Vec<LogFileConfig>,
@@ -16,20 +12,12 @@ pub struct LogFileConfig {
     pub polling_frequency_ms: u64,
     pub destination: DestinationConfig,
 
-    // DESIGN CHOICE: Dual-trigger buffering
-    // Buffer flushes when EITHER condition is met (OR logic):
-    // 1. Buffer reaches buffer_size lines
-    // 2. flush_interval_ms elapsed since last flush
     #[serde(default = "default_buffer_size")]
     pub buffer_size: usize,
 
     #[serde(default = "default_flush_interval_ms")]
     pub flush_interval_ms: u64,
 
-    // DESIGN CHOICE: Regex-based filtering
-    // match_on: Only ship lines matching at least one of these patterns (whitelist)
-    // exclude_on: Skip lines matching any of these patterns (blacklist)
-    // Logic: If match_on is non-empty, line must match. Then check exclude_on.
     #[serde(default)]
     pub match_on: Vec<String>, // List of regex patterns to match (empty = match all)
 
@@ -47,10 +35,12 @@ fn default_flush_interval_ms() -> u64 {
     30_000
 }
 
-// DESIGN CHOICE: Flexible destination config
-// Different destination types require different fields.
-// We use a `type` field to determine which destination to create,
-// and all other fields are optional to support any destination type.
+#[derive(Debug, Deserialize, Clone)]
+pub struct BasicAuth {
+    pub username: String,
+    pub password: String,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct DestinationConfig {
     #[serde(rename = "type")]
@@ -58,8 +48,9 @@ pub struct DestinationConfig {
 
     // HTTP destination fields
     pub endpoint: Option<String>, // HTTP endpoint URL
-    #[allow(dead_code)]
+    pub require_auth: Option<bool>,
     pub api_key: Option<String>, // Optional API key for auth
+    pub basic: Option<BasicAuth>,
 
     // Syslog destination fields
     pub host: Option<String>,     // Syslog server hostname
@@ -85,6 +76,15 @@ impl Config {
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
         let config = serde_yaml::from_str(yaml)?;
         Ok(config)
+    }
+}
+
+impl DestinationConfig {
+    pub fn has_auth(&self) -> bool {
+        let has_api = self.api_key.as_ref().is_some_and(|k| !k.is_empty());
+        let has_basic = self.basic.is_some();
+
+        has_api || has_basic
     }
 }
 
@@ -163,14 +163,21 @@ log_files:
     destination:
       type: "http"
       endpoint: "http://example.com/logs"
+      require_auth: true
       api_key: "secret123"
+      basic:
+        username: "user"
+        password: "password"
         "#;
 
         let config = Config::from_yaml(yaml).unwrap();
         let dest = &config.log_files[0].destination;
         assert_eq!(dest.dest_type, "http");
         assert_eq!(dest.endpoint.as_ref().unwrap(), "http://example.com/logs");
+        assert_eq!(dest.require_auth, Some(true));
         assert_eq!(dest.api_key.as_ref().unwrap(), "secret123");
+        assert_eq!(dest.basic.as_ref().unwrap().username, "user");
+        assert_eq!(dest.basic.as_ref().unwrap().password, "password");
     }
 
     #[test]

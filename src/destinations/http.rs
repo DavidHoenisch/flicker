@@ -4,8 +4,11 @@
 // HTTP endpoints, or any service accepting JSON log arrays.
 
 use super::{Destination, LogEntry};
-use anyhow::Result;
+use crate::config::DestinationConfig;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
+use base64;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 
 pub struct HttpDestination {
     client: reqwest::Client,
@@ -13,11 +16,38 @@ pub struct HttpDestination {
 }
 
 impl HttpDestination {
-    pub fn new(endpoint: String) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            endpoint,
+    pub fn new(config: &DestinationConfig) -> Result<Self> {
+        let endpoint = config
+            .endpoint
+            .clone()
+            .context("HTTP destination requires an endpoint")?;
+
+        let require_auth = config.require_auth.unwrap_or(false);
+        if require_auth && !config.has_auth() {
+            anyhow::bail!("HTTP destination requires auth, but no API key or basic auth was provided");
         }
+
+        let mut headers = HeaderMap::new();
+        if let Some(api_key) = &config.api_key {
+            let mut auth_value = HeaderValue::from_str(&format!("Bearer {}", api_key))?;
+            auth_value.set_sensitive(true);
+            headers.insert(AUTHORIZATION, auth_value);
+        } else if let Some(basic) = &config.basic {
+            let auth_string = format!("{}:{}", basic.username, basic.password);
+            let mut auth_value =
+                HeaderValue::from_str(&format!("Basic {}", base64::encode(auth_string)))?;
+            auth_value.set_sensitive(true);
+            headers.insert(AUTHORIZATION, auth_value);
+        }
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+
+        Ok(Self {
+            client,
+            endpoint,
+        })
     }
 }
 

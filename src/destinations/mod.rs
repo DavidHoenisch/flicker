@@ -37,11 +37,8 @@ pub fn create_destination(
 ) -> Result<Box<dyn Destination>> {
     match config.dest_type.as_str() {
         "http" => {
-            let endpoint = config
-                .endpoint
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("HTTP destination requires 'endpoint' field"))?;
-            Ok(Box::new(http::HttpDestination::new(endpoint)))
+            let dest = http::HttpDestination::new(config)?;
+            Ok(Box::new(dest))
         }
         "syslog" => {
             let host = config
@@ -89,7 +86,9 @@ mod tests {
         let config = DestinationConfig {
             dest_type: "http".to_string(),
             endpoint: Some("http://localhost:8000".to_string()),
+            require_auth: Some(false),
             api_key: None,
+            basic: None,
             host: None,
             port: None,
             protocol: None,
@@ -107,7 +106,9 @@ mod tests {
         let config = DestinationConfig {
             dest_type: "http".to_string(),
             endpoint: None,
+            require_auth: None,
             api_key: None,
+            basic: None,
             host: None,
             port: None,
             protocol: None,
@@ -127,7 +128,9 @@ mod tests {
         let config = DestinationConfig {
             dest_type: "syslog".to_string(),
             endpoint: None,
+            require_auth: None,
             api_key: None,
+            basic: None,
             host: Some("localhost".to_string()),
             port: Some(514),
             protocol: Some("udp".to_string()),
@@ -145,7 +148,9 @@ mod tests {
         let config = DestinationConfig {
             dest_type: "syslog".to_string(),
             endpoint: None,
+            require_auth: None,
             api_key: None,
+            basic: None,
             host: Some("syslog.local".to_string()),
             port: None,     // Should default to 514
             protocol: None, // Should default to "udp"
@@ -163,7 +168,9 @@ mod tests {
         let config = DestinationConfig {
             dest_type: "elasticsearch".to_string(),
             endpoint: None,
+            require_auth: None,
             api_key: None,
+            basic: None,
             host: None,
             port: None,
             protocol: None,
@@ -181,7 +188,9 @@ mod tests {
         let config = DestinationConfig {
             dest_type: "file".to_string(),
             endpoint: None,
+            require_auth: None,
             api_key: None,
+            basic: None,
             host: None,
             port: None,
             protocol: None,
@@ -199,7 +208,9 @@ mod tests {
         let config = DestinationConfig {
             dest_type: "unknown".to_string(),
             endpoint: None,
+            require_auth: None,
             api_key: None,
+            basic: None,
             host: None,
             port: None,
             protocol: None,

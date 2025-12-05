@@ -7,13 +7,27 @@ log_files:
     buffer_size: 100          # Flush when buffer reaches 100 lines
     flush_interval_ms: 30000  # OR flush after 30 seconds (whichever comes first)
     destination:
+      type: "http"
       endpoint: "http://localhost:8000/ingest"
-      api_key: "sec_12345_xyz"
+      require_auth: true
+      # Optional: API Key (Bearer token)
+      # api_key: "your_secret_token"
+      # Optional: Basic Auth
+      basic:
+        username: "flicker"
+        password: "your_secret_password"
 
   - path: "/var/log/auth.log"
     polling_frequency_ms: 500  # Poll less frequently
     buffer_size: 50            # Smaller buffer for less active logs
     flush_interval_ms: 60000   # Flush after 60 seconds if buffer not full
     destination:
+      type: "http"
       endpoint: "http://localhost:8000/ingest"
-      api_key: "sec_12345_xyz"
+      require_auth: true
+      # Optional: API Key (Bearer token)
+      api_key: "your_secret_token"
+      # Optional: Basic Auth
+      # basic:
+      #   username: "flicker"
+      #   password: "your_secret_password"

@@ -37,18 +37,7 @@ impl LogFilter {
         })
     }
 
-    /// Check if a log line should be shipped
-    ///
-    /// DESIGN CHOICE: Two-stage filtering logic
-    /// 1. If match_patterns is non-empty: Line must match at least one pattern
-    /// 2. If exclude_patterns is non-empty: Line must not match any pattern
-    ///
-    /// This allows flexible filtering:
-    /// - match_on only: Whitelist mode (only ship matching lines)
-    /// - exclude_on only: Blacklist mode (ship all except matching lines)
-    /// - Both: Whitelist then blacklist (ship matching lines except excluded ones)
     pub fn should_ship(&self, line: &str) -> bool {
-        // Stage 1: Check match patterns (whitelist)
         if !self.match_patterns.is_empty() {
             let matches_any = self.match_patterns.iter().any(|regex| regex.is_match(line));
             if !matches_any {
@@ -56,7 +45,6 @@ impl LogFilter {
             }
         }
 
-        // Stage 2: Check exclude patterns (blacklist)
         if !self.exclude_patterns.is_empty() {
             let matches_any = self
                 .exclude_patterns
@@ -67,11 +55,9 @@ impl LogFilter {
             }
         }
 
-        // Passed all filters
         true
     }
 
-    /// Returns true if this filter has no patterns (passes everything)
     pub fn is_passthrough(&self) -> bool {
         self.match_patterns.is_empty() && self.exclude_patterns.is_empty()
     }

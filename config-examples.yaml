@@ -12,7 +12,13 @@ log_files:
     destination:
       type: "http"
       endpoint: "http://vector:8080/ingest"
-      api_key: "optional_api_key_here"  # Optional
+      require_auth: true
+      # Optional: API Key (Bearer token)
+      # api_key: "your_secret_token"
+      # Optional: Basic Auth
+      basic:
+        username: "flicker"
+        password: "your_secret_password"
 
   # ============================================================
   # Example 2: Syslog Destination via UDP (rsyslog, syslog-ng)

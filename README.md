@@ -106,7 +106,13 @@ log_files:
     destination:
       type: "http"
       endpoint: "http://log-aggregator:8000/ingest"
-      api_key: "secret_key_123"
+      require_auth: true
+      # Optional: API Key (Bearer token)
+      # api_key: "your_secret_token"
+      # Optional: Basic Auth
+      basic:
+        username: "flicker"
+        password: "your_secret_password"
 
   # Low-volume audit logs with filtering
   - path: "/var/log/myapp/audit.log"
@@ -120,6 +126,7 @@ log_files:
     destination:
       type: "http"
       endpoint: "http://security-system:9000/audit"
+      require_auth: true
       api_key: "audit_key_456"
 
   # System logs with exclusion filter
@@ -149,6 +156,10 @@ Array of log file configurations. Each entry supports:
 - **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
 - **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
 - **`destination.type`** (string, required): Destination type: "http", "syslog", "elasticsearch", or "file"
+- **`destination.endpoint`** (string, required for http): The HTTP endpoint to send logs to
+- **`destination.require_auth`** (boolean, optional for http): If true, requires either `api_key` or `basic` to be set
+- **`destination.api_key`** (string, optional for http): A bearer token to include in the `Authorization` header
+- **`destination.basic`** (object, optional for http): An object with `username` and `password` for basic authentication
 - **`destination.*`** (various, required): Destination-specific fields (see config-examples.yaml)
 
 ## Usage
@@ -336,18 +347,17 @@ Your HTTP endpoint should:
 1. **No state persistence**: File positions not saved to disk (will re-read from end on restart)
 2. **No retry logic**: Failed batches are dropped (logged to stderr)
 3. **No compression**: HTTP payloads sent uncompressed
-4. **No filtering**: Ships all log lines (no pattern matching or field extraction)
-5. **HTTP only**: No support for other protocols (Kafka, S3, etc.)
+4. **Limited destinations**: HTTP, syslog, Elasticsearch, and file are the only supported destinations
 
 ### Planned Enhancements
 - [ ] Persistent state (registry file like Filebeat)
 - [ ] Retry queue with exponential backoff
 - [ ] gzip compression for HTTP payloads
-- [ ] Filtering/parsing (regex, JSON parsing, field extraction)
+- [ ] Filtering/parsing (JSON parsing, field extraction)
 - [ ] Metrics/monitoring (Prometheus endpoint)
-- [ ] Additional destinations (Kafka, S3, file output)
+- [ ] Additional destinations (Kafka, S3)
 - [ ] TLS/mTLS support
-- [ ] Authentication schemes (OAuth, bearer tokens)
+- [X] Authentication schemes (Basic Auth, Bearer Token)
 
 ## Troubleshooting
 

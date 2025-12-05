@@ -34,6 +34,9 @@ hostname = "0.4"
 # Regular expressions (For log filtering)
 regex = "1"
 
+# Base64 encoding (For basic auth)
+base64 = "0.13"
+
 [dev-dependencies]
 # Temporary files for testing
 tempfile = "3"
