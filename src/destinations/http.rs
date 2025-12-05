@@ -36,10 +36,8 @@ impl HttpDestination {
             headers.insert(AUTHORIZATION, auth_value);
         } else if let Some(basic) = &config.basic {
             let auth_string = format!("{}:{}", basic.username, basic.password);
-            let mut auth_value = HeaderValue::from_str(&format!(
-                "Basic {}",
-                BASE64_STANDARD.encode(auth_string)
-            ))?;
+            let mut auth_value =
+                HeaderValue::from_str(&format!("Basic {}", BASE64_STANDARD.encode(auth_string)))?;
             auth_value.set_sensitive(true);
             headers.insert(AUTHORIZATION, auth_value);
         }
