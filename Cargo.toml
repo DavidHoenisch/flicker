@@ -35,7 +35,7 @@ hostname = "0.4"
 regex = "1"
 
 # Base64 encoding (For basic auth)
-base64 = "0.13"
+base64 = "0.22"
 
 [dev-dependencies]
 # Temporary files for testing

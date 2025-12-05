@@ -7,7 +7,7 @@ use super::{Destination, LogEntry};
 use crate::config::DestinationConfig;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use base64;
+use base64::prelude::*;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 pub struct HttpDestination {
@@ -36,8 +36,10 @@ impl HttpDestination {
             headers.insert(AUTHORIZATION, auth_value);
         } else if let Some(basic) = &config.basic {
             let auth_string = format!("{}:{}", basic.username, basic.password);
-            let mut auth_value =
-                HeaderValue::from_str(&format!("Basic {}", base64::encode(auth_string)))?;
+            let mut auth_value = HeaderValue::from_str(&format!(
+                "Basic {}",
+                BASE64_STANDARD.encode(auth_string)
+            ))?;
             auth_value.set_sensitive(true);
             headers.insert(AUTHORIZATION, auth_value);
         }
