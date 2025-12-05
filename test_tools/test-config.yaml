@@ -8,6 +8,7 @@ log_files:
     flush_interval_ms: 10000  # OR after 10 seconds
     destination:
       endpoint: "http://localhost:8000/ingest"
+      type: "http"
 
   - path: "./test2.log"
     polling_frequency_ms: 600
@@ -15,6 +16,7 @@ log_files:
     flush_interval_ms: 12000
     destination:
       endpoint: "http://localhost:8000/ingest"
+      type: "http"
 
   - path: "./test3.log"
     polling_frequency_ms: 400
@@ -22,6 +24,7 @@ log_files:
     flush_interval_ms: 8000
     destination:
       endpoint: "http://localhost:8000/ingest"
+      type: "http"
 
   - path: "./test4.log"
     polling_frequency_ms: 700
@@ -29,6 +32,7 @@ log_files:
     flush_interval_ms: 15000
     destination:
       endpoint: "http://localhost:8000/ingest"
+      type: "http"
 
   - path: "./test5.log"
     polling_frequency_ms: 550
@@ -36,3 +40,4 @@ log_files:
     flush_interval_ms: 11000
     destination:
       endpoint: "http://localhost:8000/ingest"
+      type: "http"

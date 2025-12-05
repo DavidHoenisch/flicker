@@ -8,7 +8,7 @@ use crate::config::DestinationConfig;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 pub struct HttpDestination {
     client: reqwest::Client,
@@ -24,7 +24,9 @@ impl HttpDestination {
 
         let require_auth = config.require_auth.unwrap_or(false);
         if require_auth && !config.has_auth() {
-            anyhow::bail!("HTTP destination requires auth, but no API key or basic auth was provided");
+            anyhow::bail!(
+                "HTTP destination requires auth, but no API key or basic auth was provided"
+            );
         }
 
         let mut headers = HeaderMap::new();
@@ -44,10 +46,7 @@ impl HttpDestination {
             .default_headers(headers)
             .build()?;
 
-        Ok(Self {
-            client,
-            endpoint,
-        })
+        Ok(Self { client, endpoint })
     }
 }
 
