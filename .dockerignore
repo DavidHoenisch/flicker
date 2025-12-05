@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+.claude/
+.gemini/
+test_tools/
+artifacts/
+*.md
+*.yaml
+!flicker.yaml
