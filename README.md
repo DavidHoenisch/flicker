@@ -1,8 +1,7 @@
 <div align="center">
   <img style="height: 50px; width: 50px;" src="assets/flicker.png" alt="logo">
+  <h2>Flicker<h2>
 </div>
-
-# Flicker
 
 A lightweight, high-performance log shipping agent written in Rust. Flicker
 efficiently tails multiple log files and Docker container logs, shipping them
