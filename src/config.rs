@@ -4,11 +4,33 @@ use std::fs;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub log_files: Vec<LogFileConfig>,
+
+    #[serde(default)]
+    pub docker_containers: Vec<DockerContainerConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LogFileConfig {
     pub path: String,
+    pub polling_frequency_ms: u64,
+    pub destination: DestinationConfig,
+
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size: usize,
+
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+
+    #[serde(default)]
+    pub match_on: Vec<String>, // List of regex patterns to match (empty = match all)
+
+    #[serde(default)]
+    pub exclude_on: Vec<String>, // List of regex patterns to exclude (empty = exclude none)
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DockerContainerConfig {
+    pub container: String, // Container name or ID
     pub polling_frequency_ms: u64,
     pub destination: DestinationConfig,
 

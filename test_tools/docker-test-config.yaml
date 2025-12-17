@@ -1,0 +1,40 @@
+# Docker Container Log Capture Test Configuration
+# This config demonstrates Docker container log tailing
+
+log_files: []  # No log files for this test
+
+docker_containers:
+  # Test container with no filtering - captures all log levels
+  - container: "flicker-test-logger"
+    polling_frequency_ms: 1000
+    buffer_size: 5            # Small buffer to see frequent flushes
+    flush_interval_ms: 10000  # 10 seconds
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+
+  # Same container with filtering - only ERROR and WARN
+  # This demonstrates how to filter logs from the same container to different destinations
+  # Uncomment to test filtering:
+  # - container: "flicker-test-logger"
+  #   polling_frequency_ms: 1000
+  #   buffer_size: 5
+  #   flush_interval_ms: 10000
+  #   match_on:
+  #     - "ERROR"
+  #     - "WARN"
+  #   destination:
+  #     type: "file"
+  #     path: "/tmp/docker-errors.jsonl"
+
+  # Same container with exclusion filter - everything except DEBUG
+  # Uncomment to test exclusion:
+  # - container: "flicker-test-logger"
+  #   polling_frequency_ms: 1000
+  #   buffer_size: 5
+  #   flush_interval_ms: 10000
+  #   exclude_on:
+  #     - "DEBUG"
+  #   destination:
+  #     type: "file"
+  #     path: "/tmp/docker-no-debug.jsonl"

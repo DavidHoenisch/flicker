@@ -31,3 +31,52 @@ log_files:
       # basic:
       #   username: "flicker"
       #   password: "your_secret_password"
+
+# Docker containers can also be configured with the same options
+docker_containers:
+  # You can specify containers by name or ID
+  - container: "my-app-container"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    # Optional: filter logs with regex patterns
+    match_on:
+      - "ERROR"
+      - "WARN"
+    exclude_on:
+      - "DEBUG"
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+      require_auth: true
+      api_key: "your_secret_token"
+
+  # Example: Ship to syslog
+  - container: "nginx"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 60000
+    destination:
+      type: "syslog"
+      host: "syslog.local"
+      port: 514
+      protocol: "tcp"
+
+  # Example: Ship to Elasticsearch
+  - container: "postgres"
+    polling_frequency_ms: 1000
+    buffer_size: 200
+    flush_interval_ms: 60000
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "postgres-logs"
+
+  # You can also use container IDs
+  - container: "a1b2c3d4e5f6"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    destination:
+      type: "file"
+      path: "/backup/container-logs.jsonl"

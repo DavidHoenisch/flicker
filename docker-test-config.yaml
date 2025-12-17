@@ -1,0 +1,10 @@
+log_files: []
+
+docker_containers:
+  - container: "flicker-test-container"
+    polling_frequency_ms: 1000
+    buffer_size: 5
+    flush_interval_ms: 5000
+    destination:
+      type: "file"
+      path: "/tmp/docker-test-output.jsonl"

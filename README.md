@@ -1,25 +1,32 @@
 # Flicker
 
 A lightweight, high-performance log shipping agent written in Rust. Flicker
-efficiently tails multiple log files and ships them to HTTP endpoints with
-intelligent buffering.
+efficiently tails multiple log files and Docker container logs, shipping them
+to various destinations with intelligent buffering.
 
 ## Overview
 
 Flicker is designed to be a simple yet powerful log shipper similar to Filebeat
 or Fluentd, but with a focus on simplicity and performance. It reads log
-files from disk, buffers entries intelligently, and ships them in batches to
-configured HTTP destinations.
+files from disk and Docker container logs, buffers entries intelligently, and
+ships them in batches to configured destinations.
 
 ## Key Features
 
-### 🎯 Per-File Configuration
-Each log file is configured independently with its own:
+### 🎯 Per-Source Configuration
+Each log source (file or Docker container) is configured independently with its own:
 - Polling frequency
 - Buffer size
 - Flush interval
 - Destination endpoint
 - Regex filters (match/exclude patterns)
+
+### 🐋 Docker Container Support
+Capture logs directly from Docker containers:
+- Target containers by name or ID
+- Captures both stdout and stderr
+- Same buffering and filtering capabilities as file tailing
+- Ships to any supported destination
 
 ### 🔍 Regex-Based Filtering
 Powerful filtering to ship only relevant logs:
@@ -37,9 +44,9 @@ This ensures high-volume logs flush frequently for low latency, while low-volume
 logs don't sit in the buffer indefinitely.
 
 ### 🚀 Concurrent Processing
-- One independent async task per log file
-- No shared state between files
-- Each file can have different polling rates and destinations
+- One independent async task per log source (file or container)
+- No shared state between sources
+- Each source can have different polling rates and destinations
 
 ### 🔄 File Rotation & Truncation Handling
 - Detects file rotation via inode changes (Unix/Linux)
@@ -66,22 +73,30 @@ logs don't sit in the buffer indefinitely.
 │ Log File 3  │───┤                               └─ Time trigger: 30s elapsed
 └─────────────┘   │
                   │    ┌──────────────┐      ┌────────────┐      ┌──────────────┐
-┌─────────────┐   ├───▶│ Flicker Task │─────▶│   Buffer   │─────▶│ HTTP Dest 2  │
+┌─────────────┐   ├───▶│ Flicker Task │─────▶│   Buffer   │─────▶│ Syslog Dest  │
 │ Log File 4  │───┤    │   (Tailer)   │      │ (10 lines) │      └──────────────┘
 └─────────────┘   │    └──────────────┘      └────────────┘
                   │
+┌─────────────┐   │    ┌──────────────┐      ┌────────────┐      ┌──────────────┐
+│  Container  │───┼───▶│ Docker Task  │─────▶│   Buffer   │─────▶│  ES Dest     │
+│   (nginx)   │   │    │   (Tailer)   │      │ (20 lines) │      └──────────────┘
+└─────────────┘   │    └──────────────┘      └────────────┘
+                  │
 ┌─────────────┐   │
-│ Log File 5  │───┘
+│  Container  │───┘
+│ (postgres)  │
 └─────────────┘
 ```
 
-Each log file runs in its own async task with independent buffering and destination.
+Each log source (file or container) runs in its own async task with independent
+buffering and destination.
 
 ## Installation
 
 ### Prerequisites
 - Rust 1.70+ (install from [rustup.rs](https://rustup.rs))
 - Python 3.7+ (for testing tools)
+- Docker (optional, only if using Docker container log capture)
 
 ### Build from Source
 ```bash
@@ -142,6 +157,32 @@ log_files:
       type: "syslog"
       host: "syslog-server.local"
       protocol: "udp"
+
+docker_containers:
+  # Capture logs from Docker containers by name or ID
+  - container: "my-app-container"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    # Optional: filter logs with regex patterns
+    match_on:
+      - "ERROR"
+      - "WARN"
+    destination:
+      type: "http"
+      endpoint: "http://log-aggregator:8000/ingest"
+      require_auth: true
+      api_key: "your_secret_token"
+
+  # Ship container logs to Elasticsearch
+  - container: "nginx"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 60000
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "nginx-logs"
 ```
 
 ### Configuration Parameters
@@ -155,12 +196,28 @@ Array of log file configurations. Each entry supports:
 - **`flush_interval_ms`** (integer, default: 30000): Flush after this many milliseconds
 - **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
 - **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
-- **`destination.type`** (string, required): Destination type: "http", "syslog", "elasticsearch", or "file"
-- **`destination.endpoint`** (string, required for http): The HTTP endpoint to send logs to
-- **`destination.require_auth`** (boolean, optional for http): If true, requires either `api_key` or `basic` to be set
-- **`destination.api_key`** (string, optional for http): A bearer token to include in the `Authorization` header
-- **`destination.basic`** (object, optional for http): An object with `username` and `password` for basic authentication
-- **`destination.*`** (various, required): Destination-specific fields (see config-examples.yaml)
+- **`destination`** (object, required): Destination configuration (see below)
+
+#### `docker_containers` (array, optional)
+Array of Docker container configurations. Each entry supports:
+
+- **`container`** (string, required): Container name or ID
+- **`polling_frequency_ms`** (integer, required): How often to check for new lines (milliseconds)
+- **`buffer_size`** (integer, default: 100): Flush when buffer reaches this many lines
+- **`flush_interval_ms`** (integer, default: 30000): Flush after this many milliseconds
+- **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
+- **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
+- **`destination`** (object, required): Destination configuration (see below)
+
+#### `destination` (object)
+Destination configuration for both log files and Docker containers:
+
+- **`type`** (string, required): Destination type: "http", "syslog", "elasticsearch", or "file"
+- **`endpoint`** (string, required for http): The HTTP endpoint to send logs to
+- **`require_auth`** (boolean, optional for http): If true, requires either `api_key` or `basic` to be set
+- **`api_key`** (string, optional for http): A bearer token to include in the `Authorization` header
+- **`basic`** (object, optional for http): An object with `username` and `password` for basic authentication
+- **Other fields** (various): Destination-specific fields (see examples/flicker-example.yaml)
 
 ## Usage
 
@@ -208,11 +265,12 @@ sudo systemctl status flicker
 
 ## Testing
 
-Flicker includes comprehensive testing tools:
+Flicker includes comprehensive testing tools in the `test_tools/` directory:
 
 ### 1. Test Receiver (HTTP endpoint simulator)
 Receives and displays log batches:
 ```bash
+cd test_tools
 ./test-receiver.py
 ```
 
@@ -220,6 +278,7 @@ Receives and displays log batches:
 Generates realistic log data at configurable rates:
 
 ```bash
+cd test_tools
 # High volume (stress test)
 ./test-log-generator.py --volume high --multi-file 5
 
@@ -238,9 +297,25 @@ Generates realistic log data at configurable rates:
 - `medium`: 100-500ms delay (~2-10 entries/sec) - balanced
 - `low`: 1-3s delay (~0.3-1 entries/sec) - tests time-based flush trigger
 
-### 3. End-to-End Test
+### 3. Docker Test Container
+Runs a container that generates logs for testing Docker log capture:
+
+```bash
+cd test_tools
+# Start test container
+./docker-test-container.sh
+
+# In another terminal, run Flicker with Docker test config
+cargo run -- -c test_tools/docker-test-config.yaml
+```
+
+The test container generates logs at a configurable rate for testing buffering
+and filtering.
+
+### 4. End-to-End Test
 Automated test that starts receiver, Flicker, and generator:
 ```bash
+cd test_tools
 ./test-e2e.sh
 ```
 
@@ -255,15 +330,37 @@ Press Ctrl+C to stop all processes.
 
 **Terminal 2 - Start Flicker:**
 ```bash
-cargo run -- -c test-config.yaml
+cargo run -- -c test_tools/test-config.yaml
 ```
 
 **Terminal 3 - Generate logs:**
 ```bash
+cd test_tools
 ./test-log-generator.py --volume high --multi-file 5
 ```
 
 Watch Terminal 1 for batches arriving from all 5 log files!
+
+### Docker Testing (3 terminals)
+
+**Terminal 1 - Start receiver:**
+```bash
+cd test_tools
+./test-receiver.py
+```
+
+**Terminal 2 - Start Flicker:**
+```bash
+cargo run -- -c test_tools/docker-test-config.yaml
+```
+
+**Terminal 3 - Start test container:**
+```bash
+cd test_tools
+./docker-test-container.sh
+```
+
+Watch Terminal 1 for batches arriving from the Docker container!
 
 ## Design Decisions
 
@@ -313,9 +410,15 @@ Flicker sends log batches as JSON arrays via HTTP POST:
   {
     "path": "/var/log/app.log",
     "line": "[2025-12-03 14:23:46] WARN - High memory usage: 85%"
+  },
+  {
+    "path": "docker://nginx",
+    "line": "192.168.1.1 - - [03/Dec/2025:14:23:47 +0000] \"GET / HTTP/1.1\" 200"
   }
 ]
 ```
+
+Docker container logs are prefixed with `docker://` followed by the container name.
 
 ### Destination Requirements
 Your HTTP endpoint should:
@@ -403,6 +506,7 @@ Inspired by:
 
 Built with:
 - [Tokio](https://tokio.rs/) - Async runtime
+- [Bollard](https://docs.rs/bollard/) - Docker API client
 - [reqwest](https://docs.rs/reqwest/) - HTTP client
 - [serde](https://serde.rs/) - Serialization
 - [clap](https://docs.rs/clap/) - CLI parsing

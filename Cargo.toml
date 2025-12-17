@@ -37,6 +37,12 @@ regex = "1"
 # Base64 encoding (For basic auth)
 base64 = "0.22"
 
+# Docker API client (For Docker container log capture)
+bollard = "0.17"
+
+# Async utilities (For Docker log streaming)
+futures-util = "0.3"
+
 [dev-dependencies]
 # Temporary files for testing
 tempfile = "3"
