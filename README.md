@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/flicker.png" alt="logo">
+  <img style="height: 50px; width: 50px;" src="assets/flicker.png" alt="logo">
 </div>
 
 # Flicker
