@@ -1,0 +1,42 @@
+# Test configuration for mTLS (mutual TLS) testing
+# This config sends logs to an HTTPS endpoint with client certificate authentication
+#
+# Before using this config:
+# 1. Generate test certificates: ./test_tools/generate-test-certs.sh
+# 2. Start the mTLS receiver: ./test_tools/test-mtls-receiver.py
+# 3. Generate test logs: ./test_tools/test-log-generator.py --path test_tools/test-mtls.log --volume high
+# 4. Run Flicker: ./target/release/flicker -c test_tools/test-mtls-config.yaml
+
+log_files:
+  # High-volume test log with mTLS
+  - path: "test_tools/test-mtls.log"
+    polling_frequency_ms: 250
+    buffer_size: 50          # Small buffer for quick flushing
+    flush_interval_ms: 5000  # Flush after 5 seconds
+    destination:
+      type: "http"
+      endpoint: "https://localhost:8443/ingest"
+      require_auth: false  # Auth is handled by mTLS
+      compression: true    # Enable gzip compression
+      tls:
+        # Client certificate for mTLS authentication
+        cert_path: "test_tools/certs/client.crt"
+        key_path: "test_tools/certs/client.key"
+        # CA certificate to verify the server
+        ca_cert_path: "test_tools/certs/ca.crt"
+        # Don't accept invalid certs in production, but this is a test
+        accept_invalid_certs: false
+
+  # Test log file without mTLS for comparison
+  - path: "test_tools/test-mtls-secondary.log"
+    polling_frequency_ms: 500
+    buffer_size: 100
+    flush_interval_ms: 10000
+    destination:
+      type: "http"
+      endpoint: "https://localhost:8443/ingest"
+      compression: true
+      tls:
+        cert_path: "test_tools/certs/client.crt"
+        key_path: "test_tools/certs/client.key"
+        ca_cert_path: "test_tools/certs/ca.crt"

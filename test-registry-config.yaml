@@ -1,0 +1,10 @@
+log_files:
+  - path: /tmp/test-registry.log
+    polling_frequency_ms: 1000
+    buffer_size: 10
+    flush_interval_ms: 5000
+    destination:
+      type: file
+      path: /tmp/test-output.jsonl
+
+docker_containers: []

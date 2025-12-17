@@ -1,5 +1,6 @@
-use bollard::container::LogsOptions;
+use crate::registry::RegistryUpdate;
 use bollard::Docker;
+use bollard::container::LogsOptions;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -12,6 +13,8 @@ struct ContainerState {
 pub struct DockerTailer {
     docker: Docker,
     containers: HashMap<String, ContainerState>,
+    initial_timestamps: HashMap<String, DateTime<Utc>>, // container -> last_timestamp
+    registry_tx: Option<tokio::sync::mpsc::UnboundedSender<RegistryUpdate>>,
 }
 
 impl DockerTailer {
@@ -22,7 +25,19 @@ impl DockerTailer {
         Ok(Self {
             docker,
             containers: HashMap::new(),
+            initial_timestamps: HashMap::new(),
+            registry_tx: None,
         })
+    }
+
+    /// Set the registry channel for sending position updates
+    pub fn set_registry_sender(&mut self, tx: tokio::sync::mpsc::UnboundedSender<RegistryUpdate>) {
+        self.registry_tx = Some(tx);
+    }
+
+    /// Set initial timestamp for a container (loaded from registry)
+    pub fn set_initial_timestamp(&mut self, container: String, timestamp: DateTime<Utc>) {
+        self.initial_timestamps.insert(container, timestamp);
     }
 
     /// Read new log lines from a Docker container since last poll
@@ -40,14 +55,25 @@ impl DockerTailer {
 
         if is_new_container {
             // First time seeing this container
-            // Start from "now" to only capture new logs
+            // Check if we have an initial timestamp from registry
+            let initial_timestamp = if let Some(saved_ts) = self.initial_timestamps.get(container) {
+                eprintln!(
+                    "Resuming Docker container {} from registry timestamp {}",
+                    container, saved_ts
+                );
+                Some(*saved_ts)
+            } else {
+                // Start from "now" to only capture new logs
+                eprintln!("Now tailing Docker container: {}", container);
+                Some(Utc::now())
+            };
+
             self.containers.insert(
                 container.to_string(),
                 ContainerState {
-                    last_timestamp: Some(Utc::now()),
+                    last_timestamp: initial_timestamp,
                 },
             );
-            eprintln!("Now tailing Docker container: {}", container);
             return Ok(lines); // Return empty on first poll (similar to file tailer)
         }
 
@@ -57,7 +83,7 @@ impl DockerTailer {
         let mut options = LogsOptions::<String> {
             stdout: true,
             stderr: true,
-            follow: false, // Don't follow, just get what's available
+            follow: false,    // Don't follow, just get what's available
             timestamps: true, // We need timestamps to track position
             ..Default::default()
         };
@@ -107,6 +133,16 @@ impl DockerTailer {
 
         // Update state with latest timestamp
         state.last_timestamp = latest_timestamp;
+
+        // Send update to registry if enabled
+        if let Some(ref tx) = self.registry_tx {
+            if let Some(ts) = latest_timestamp {
+                let _ = tx.send(RegistryUpdate::UpdateContainer {
+                    container: container.to_string(),
+                    last_timestamp: ts,
+                });
+            }
+        }
 
         Ok(lines)
     }

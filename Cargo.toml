@@ -19,14 +19,14 @@ anyhow = "1.0"
 async-trait = "0.1"
 
 # HTTP Client (For HTTP/Elasticsearch destinations)
-# Use rustls instead of native-tls (OpenSSL) for easier cross-compilation
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+# Use native-tls for mTLS client certificate support (provides Identity::from_pem())
+reqwest = { version = "0.11", features = ["json", "native-tls"], default-features = false }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
 # Date/time handling (For Elasticsearch timestamps)
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 
 # System hostname (For Syslog)
 hostname = "0.4"
@@ -42,6 +42,9 @@ bollard = "0.17"
 
 # Async utilities (For Docker log streaming)
 futures-util = "0.3"
+
+# Gzip compression (For HTTP payload compression)
+flate2 = "1.0"
 
 [dev-dependencies]
 # Temporary files for testing

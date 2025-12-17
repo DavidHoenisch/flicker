@@ -1,3 +1,4 @@
+use crate::registry::RegistryUpdate;
 use std::collections::HashMap;
 use std::fs::{File, metadata};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -13,13 +14,27 @@ struct FileState {
 /// Manages tailing multiple log files
 pub struct LogTailer {
     files: HashMap<PathBuf, FileState>,
+    initial_positions: HashMap<String, (u64, u64)>, // path -> (position, inode)
+    registry_tx: Option<tokio::sync::mpsc::UnboundedSender<RegistryUpdate>>,
 }
 
 impl LogTailer {
     pub fn new() -> Self {
         Self {
             files: HashMap::new(),
+            initial_positions: HashMap::new(),
+            registry_tx: None,
         }
+    }
+
+    /// Set the registry channel for sending position updates
+    pub fn set_registry_sender(&mut self, tx: tokio::sync::mpsc::UnboundedSender<RegistryUpdate>) {
+        self.registry_tx = Some(tx);
+    }
+
+    /// Set initial position for a file (loaded from registry)
+    pub fn set_initial_position(&mut self, path: String, position: u64, inode: u64) {
+        self.initial_positions.insert(path, (position, inode));
     }
 
     /// Read new lines from a log file since last poll
@@ -91,15 +106,38 @@ impl LogTailer {
 
             // Update position after reading
             state.position = state.reader.stream_position()?;
+
+            // Send update to registry if enabled
+            if let Some(ref tx) = self.registry_tx {
+                let _ = tx.send(RegistryUpdate::UpdateFile {
+                    path: path.to_string(),
+                    position: state.position,
+                    inode: state.inode,
+                });
+            }
         } else {
             // First time seeing this file, open it
             let file = File::open(&path_buf)?;
             let mut reader = BufReader::new(file);
 
-            // DESIGN CHOICE: Start at end of file for new files
-            // We don't want to ship the entire existing log on startup
-            // Only ship new lines that arrive after we start
-            let position = reader.seek(SeekFrom::End(0))?;
+            // Check if we have an initial position from registry
+            let position = if let Some((saved_pos, saved_inode)) = self.initial_positions.get(path)
+            {
+                // Use saved position if inode matches (file hasn't been rotated)
+                if *saved_inode == current_inode {
+                    eprintln!("Resuming {} from registry position {}", path, saved_pos);
+                    reader.seek(SeekFrom::Start(*saved_pos))?
+                } else {
+                    eprintln!("File {} was rotated (inode changed), starting at end", path);
+                    reader.seek(SeekFrom::End(0))?
+                }
+            } else {
+                // DESIGN CHOICE: Start at end of file for new files
+                // We don't want to ship the entire existing log on startup
+                // Only ship new lines that arrive after we start
+                eprintln!("Now tailing {} from position end", path);
+                reader.seek(SeekFrom::End(0))?
+            };
 
             self.files.insert(
                 path_buf.clone(),
@@ -109,8 +147,6 @@ impl LogTailer {
                     inode: current_inode,
                 },
             );
-
-            eprintln!("Now tailing {} from position {}", path, position);
         }
 
         Ok(lines)

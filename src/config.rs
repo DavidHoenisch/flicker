@@ -2,11 +2,67 @@ use serde::Deserialize;
 use std::fs;
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct RetryConfigOptions {
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+
+    #[serde(default = "default_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+
+    #[serde(default = "default_max_delay_ms")]
+    pub max_delay_ms: u64,
+
+    #[serde(default = "default_max_queue_size")]
+    pub max_queue_size: usize,
+}
+
+impl Default for RetryConfigOptions {
+    fn default() -> Self {
+        Self {
+            max_retries: default_max_retries(),
+            initial_delay_ms: default_initial_delay_ms(),
+            max_delay_ms: default_max_delay_ms(),
+            max_queue_size: default_max_queue_size(),
+        }
+    }
+}
+
+impl RetryConfigOptions {
+    pub fn to_retry_config(&self) -> crate::retry_queue::RetryConfig {
+        crate::retry_queue::RetryConfig {
+            max_retries: self.max_retries,
+            initial_delay_ms: self.initial_delay_ms,
+            max_delay_ms: self.max_delay_ms,
+            max_queue_size: self.max_queue_size,
+        }
+    }
+}
+
+fn default_max_retries() -> u32 {
+    5
+}
+
+fn default_initial_delay_ms() -> u64 {
+    1000 // 1 second
+}
+
+fn default_max_delay_ms() -> u64 {
+    60000 // 60 seconds
+}
+
+fn default_max_queue_size() -> usize {
+    100
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub log_files: Vec<LogFileConfig>,
 
     #[serde(default)]
     pub docker_containers: Vec<DockerContainerConfig>,
+
+    #[serde(default)]
+    pub retry: RetryConfigOptions,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -64,6 +120,14 @@ pub struct BasicAuth {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct TlsConfig {
+    pub cert_path: String, // Path to client certificate file (PEM format)
+    pub key_path: String,  // Path to client private key file (PEM format)
+    pub ca_cert_path: Option<String>, // Optional path to CA certificate for server verification
+    pub accept_invalid_certs: Option<bool>, // Accept invalid/self-signed server certs (default: false)
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct DestinationConfig {
     #[serde(rename = "type")]
     pub dest_type: String, // "http", "syslog", "elasticsearch", "file"
@@ -73,6 +137,8 @@ pub struct DestinationConfig {
     pub require_auth: Option<bool>,
     pub api_key: Option<String>, // Optional API key for auth
     pub basic: Option<BasicAuth>,
+    pub compression: Option<bool>, // Enable gzip compression (default: false)
+    pub tls: Option<TlsConfig>,    // TLS/mTLS configuration
 
     // Syslog destination fields
     pub host: Option<String>,     // Syslog server hostname
@@ -318,5 +384,59 @@ log_files: []
 
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(config.log_files.len(), 0);
+    }
+
+    #[test]
+    fn test_http_destination_with_tls() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "https://example.com/logs"
+      tls:
+        cert_path: "/etc/flicker/client.crt"
+        key_path: "/etc/flicker/client.key"
+        ca_cert_path: "/etc/flicker/ca.crt"
+        accept_invalid_certs: false
+        "#;
+
+        let config = Config::from_yaml(yaml).unwrap();
+        let dest = &config.log_files[0].destination;
+        assert_eq!(dest.dest_type, "http");
+        assert_eq!(dest.endpoint.as_ref().unwrap(), "https://example.com/logs");
+        assert!(dest.tls.is_some());
+
+        let tls = dest.tls.as_ref().unwrap();
+        assert_eq!(tls.cert_path, "/etc/flicker/client.crt");
+        assert_eq!(tls.key_path, "/etc/flicker/client.key");
+        assert_eq!(tls.ca_cert_path.as_ref().unwrap(), "/etc/flicker/ca.crt");
+        assert_eq!(tls.accept_invalid_certs, Some(false));
+    }
+
+    #[test]
+    fn test_http_destination_with_minimal_tls() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "https://example.com/logs"
+      tls:
+        cert_path: "/etc/flicker/client.crt"
+        key_path: "/etc/flicker/client.key"
+        "#;
+
+        let config = Config::from_yaml(yaml).unwrap();
+        let dest = &config.log_files[0].destination;
+        assert!(dest.tls.is_some());
+
+        let tls = dest.tls.as_ref().unwrap();
+        assert_eq!(tls.cert_path, "/etc/flicker/client.crt");
+        assert_eq!(tls.key_path, "/etc/flicker/client.key");
+        assert!(tls.ca_cert_path.is_none());
+        assert_eq!(tls.accept_invalid_certs, None);
     }
 }

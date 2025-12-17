@@ -2,9 +2,11 @@
 """
 Simple HTTP server to receive and display Flicker log batches.
 Listens on port 8000 and prints received log entries to stdout.
+Supports both uncompressed and gzip-compressed payloads.
 """
 
 import json
+import gzip
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import sys
@@ -29,9 +31,27 @@ class FlickerReceiver(BaseHTTPRequestHandler):
                 self.send_error(400, "Empty request body")
                 return
 
-            # Read and parse JSON body
+            # Read request body
             body = self.rfile.read(content_length)
 
+            # Check if body is gzip compressed
+            content_encoding = self.headers.get('Content-Encoding', '').lower()
+            is_compressed = content_encoding == 'gzip'
+
+            # Decompress if needed
+            if is_compressed:
+                try:
+                    body = gzip.decompress(body)
+                    original_size = content_length
+                    decompressed_size = len(body)
+                    compression_ratio = (1 - original_size / decompressed_size) * 100
+                    print(f"[INFO] Decompressed payload: {original_size} -> {decompressed_size} bytes ({compression_ratio:.1f}% compression)")
+                except Exception as e:
+                    print(f"[ERROR] Failed to decompress gzip data: {e}")
+                    self.send_error(400, f"Invalid gzip data: {e}")
+                    return
+
+            # Parse JSON body
             try:
                 data = json.loads(body.decode('utf-8'))
             except json.JSONDecodeError as e:

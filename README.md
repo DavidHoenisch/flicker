@@ -56,6 +56,12 @@ logs don't sit in the buffer indefinitely.
 - Handles file truncation gracefully
 - Automatically reopens rotated files
 
+### 🔁 Retry Queue with Exponential Backoff
+- Failed batches are queued for retry instead of being dropped
+- Exponential backoff prevents overwhelming failed destinations
+- Configurable retry limits and delays
+- Per-source retry queue to isolate failures
+
 ### 📊 Efficient Tailing
 - Seek-based reading (only reads new content)
 - Line-buffered reading (never splits log lines)
@@ -115,6 +121,13 @@ The binary will be at `./target/release/flicker`.
 Flicker uses YAML configuration. Create a `flicker.yaml` file:
 
 ```yaml
+# Optional: Global retry configuration (these are the defaults)
+retry:
+  max_retries: 5           # Maximum retry attempts before dropping a batch
+  initial_delay_ms: 1000   # Initial retry delay (1 second)
+  max_delay_ms: 60000      # Maximum retry delay (60 seconds)
+  max_queue_size: 100      # Maximum batches to keep in retry queue
+
 log_files:
   # High-volume application logs
   - path: "/var/log/myapp/app.log"
@@ -131,6 +144,14 @@ log_files:
       basic:
         username: "flicker"
         password: "your_secret_password"
+      # Optional: Enable gzip compression (default: false)
+      compression: true
+      # Optional: mTLS (mutual TLS) configuration
+      # tls:
+      #   cert_path: "/etc/flicker/certs/client.crt"
+      #   key_path: "/etc/flicker/certs/client.key"
+      #   ca_cert_path: "/etc/flicker/certs/ca.crt"  # Optional: custom CA certificate
+      #   accept_invalid_certs: false  # Optional: accept self-signed certs (default: false)
 
   # Low-volume audit logs with filtering
   - path: "/var/log/myapp/audit.log"
@@ -186,9 +207,33 @@ docker_containers:
       type: "elasticsearch"
       url: "http://elasticsearch:9200"
       index: "nginx-logs"
+
+  # Example: HTTP destination with mTLS (mutual TLS)
+  - container: "secure-app"
+    polling_frequency_ms: 500
+    buffer_size: 100
+    flush_interval_ms: 30000
+    destination:
+      type: "http"
+      endpoint: "https://secure-log-server.example.com/ingest"
+      compression: true
+      tls:
+        cert_path: "/etc/flicker/certs/client.crt"
+        key_path: "/etc/flicker/certs/client.key"
+        ca_cert_path: "/etc/flicker/certs/ca.crt"
 ```
 
 ### Configuration Parameters
+
+#### `retry` (object, optional)
+Global retry configuration for all log sources:
+
+- **`max_retries`** (integer, default: 5): Maximum number of retry attempts before dropping a batch
+- **`initial_delay_ms`** (integer, default: 1000): Initial delay before first retry in milliseconds
+- **`max_delay_ms`** (integer, default: 60000): Maximum delay between retries in milliseconds (caps exponential growth)
+- **`max_queue_size`** (integer, default: 100): Maximum number of batches to keep in retry queue per source
+
+The retry logic uses exponential backoff: each retry doubles the delay time (1s, 2s, 4s, 8s, 16s...) until it reaches `max_delay_ms`. If a batch exceeds `max_retries`, it will be dropped and logged. If the retry queue reaches `max_queue_size`, the oldest batch will be dropped to make room.
 
 #### `log_files` (array)
 Array of log file configurations. Each entry supports:
@@ -220,6 +265,12 @@ Destination configuration for both log files and Docker containers:
 - **`require_auth`** (boolean, optional for http): If true, requires either `api_key` or `basic` to be set
 - **`api_key`** (string, optional for http): A bearer token to include in the `Authorization` header
 - **`basic`** (object, optional for http): An object with `username` and `password` for basic authentication
+- **`compression`** (boolean, optional for http, default: false): Enable gzip compression for HTTP payloads
+- **`tls`** (object, optional for http): TLS/mTLS configuration for client certificate authentication
+  - **`cert_path`** (string, required): Path to client certificate file in PEM format
+  - **`key_path`** (string, required): Path to client private key file in PEM format
+  - **`ca_cert_path`** (string, optional): Path to custom CA certificate for server verification
+  - **`accept_invalid_certs`** (boolean, optional, default: false): Accept invalid/self-signed server certificates (not recommended for production)
 - **Other fields** (various): Destination-specific fields (see examples/flicker-example.yaml)
 
 ## Usage
@@ -365,6 +416,33 @@ cd test_tools
 
 Watch Terminal 1 for batches arriving from the Docker container!
 
+### mTLS Testing (3 terminals)
+
+**Terminal 1 - Start mTLS receiver:**
+```bash
+cd test_tools
+./test-mtls-receiver.py
+```
+
+**Terminal 2 - Start Flicker with mTLS:**
+```bash
+# First generate test certificates if you haven't already
+./test_tools/generate-test-certs.sh
+
+# Then start Flicker
+./target/release/flicker -c test_tools/test-mtls-config.yaml
+```
+
+**Terminal 3 - Generate logs:**
+```bash
+cd test_tools
+./test-log-generator.py --path test-mtls.log --volume high
+```
+
+Watch Terminal 1 for batches arriving with mTLS client authentication!
+
+For more details on mTLS testing, see `test_tools/README_MTLS.md`.
+
 ## Design Decisions
 
 ### Why Dual-Trigger Buffering?
@@ -450,19 +528,15 @@ Your HTTP endpoint should:
 ## Limitations & Future Work
 
 ### Current Limitations
-1. **No state persistence**: File positions not saved to disk (will re-read from end on restart)
-2. **No retry logic**: Failed batches are dropped (logged to stderr)
-3. **No compression**: HTTP payloads sent uncompressed
-4. **Limited destinations**: HTTP, syslog, Elasticsearch, and file are the only supported destinations
+1. **Limited destinations**: HTTP, syslog, Elasticsearch, and file are the only supported destinations
 
 ### Planned Enhancements
-- [ ] Persistent state (registry file like Filebeat)
-- [ ] Retry queue with exponential backoff
-- [ ] gzip compression for HTTP payloads
+- [X] Persistent state (registry file like Filebeat)
+- [X] Retry queue with exponential backoff
+- [X] gzip compression for HTTP payloads
 - [ ] Filtering/parsing (JSON parsing, field extraction)
-- [ ] Metrics/monitoring (Prometheus endpoint)
 - [ ] Additional destinations (Kafka, S3)
-- [ ] TLS/mTLS support
+- [X] TLS/mTLS support (client certificates for mutual TLS authentication)
 - [X] Authentication schemes (Basic Auth, Bearer Token)
 
 ## Troubleshooting
@@ -473,11 +547,19 @@ Your HTTP endpoint should:
 3. Check network: Can Flicker reach the destination endpoint?
 4. Check destination logs: Is it receiving requests?
 5. Check Flicker logs: Look for error messages
+6. Check retry queue: Look for `[Retry]` messages indicating failed batches are being queued and retried
 
 ### High memory usage
 - Reduce `buffer_size` in config
 - Reduce number of files being tailed
 - Check for very long log lines (buffers are line-based)
+- Reduce `retry.max_queue_size` if retry queues are filling up
+
+### Batches being dropped after retries
+- Check destination availability and network connectivity
+- Increase `retry.max_retries` if temporary outages are longer than expected
+- Increase `retry.max_delay_ms` to allow more time between retries
+- Check Flicker logs for specific error messages about why batches are failing
 
 ### Missed log entries after restart
 - Expected behavior: Flicker starts at end-of-file
