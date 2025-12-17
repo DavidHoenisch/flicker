@@ -135,14 +135,13 @@ impl DockerTailer {
         state.last_timestamp = latest_timestamp;
 
         // Send update to registry if enabled
-        if let Some(ref tx) = self.registry_tx {
-            if let Some(ts) = latest_timestamp {
+        if let Some(ref tx) = self.registry_tx
+            && let Some(ts) = latest_timestamp {
                 let _ = tx.send(RegistryUpdate::UpdateContainer {
                     container: container.to_string(),
                     last_timestamp: ts,
                 });
             }
-        }
 
         Ok(lines)
     }

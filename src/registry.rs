@@ -119,7 +119,6 @@ pub enum RegistryUpdate {
         container: String,
         last_timestamp: DateTime<Utc>,
     },
-    Shutdown,
 }
 
 /// Registry writer task that receives updates via channel and persists to disk
@@ -148,17 +147,6 @@ pub async fn registry_writer_task(
                     RegistryUpdate::UpdateContainer { container, last_timestamp } => {
                         registry.update_container(container, last_timestamp);
                         dirty = true;
-                    }
-                    RegistryUpdate::Shutdown => {
-                        // Flush one last time before shutting down
-                        if dirty {
-                            if let Err(e) = registry.save(&registry_path) {
-                                eprintln!("Failed to save registry on shutdown: {}", e);
-                            } else {
-                                eprintln!("Registry saved to {}", registry_path);
-                            }
-                        }
-                        break;
                     }
                 }
             }

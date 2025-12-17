@@ -139,16 +139,6 @@ impl RetryQueue {
         let capped_delay = delay_ms.min(self.config.max_delay_ms);
         Duration::from_millis(capped_delay)
     }
-
-    /// Get current queue size
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    /// Check if queue is empty
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -169,7 +159,6 @@ mod tests {
 
         // Add batch with retry_count = 0
         assert!(queue.add_failed_batch(entries.clone(), 0));
-        assert_eq!(queue.len(), 1);
 
         // Batch should be ready immediately (for testing)
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -181,7 +170,6 @@ mod tests {
         let ready = queue.get_ready_batches();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].1, 0); // retry_count
-        assert_eq!(queue.len(), 0); // Queue should be empty after retrieval
     }
 
     #[test]
@@ -244,7 +232,10 @@ mod tests {
         }
 
         // Queue should only have 3 items (oldest was dropped)
-        assert_eq!(queue.len(), 3);
+        // Wait for all batches to be ready
+        std::thread::sleep(std::time::Duration::from_millis(110));
+        let ready = queue.get_ready_batches();
+        assert_eq!(ready.len(), 3);
     }
 
     #[test]
