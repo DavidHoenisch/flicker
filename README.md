@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/flicker.png" alt="logo">
+</div>
+
 # Flicker
 
 A lightweight, high-performance log shipping agent written in Rust. Flicker
