@@ -1,6 +1,6 @@
 [package]
 name = "flicker"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
@@ -49,6 +49,10 @@ futures-util = "0.3"
 
 # Gzip compression (For HTTP payload compression)
 flate2 = "1.0"
+
+# AWS S3 SDK (For S3 registry storage)
+aws-sdk-s3 = "1"
+aws-config = "1"
 
 [dev-dependencies]
 # Temporary files for testing

@@ -1,0 +1,47 @@
+services:
+  # MinIO - S3-compatible object storage for testing
+  minio:
+    image: minio/minio:latest
+    container_name: flicker-test-minio
+    ports:
+      - "9001:9001"  # API port
+      - "9002:9002"  # Console port
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --address ":9001" --console-address ":9002"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - flicker-test
+
+  # Create MinIO buckets on startup
+  minio-setup:
+    image: minio/mc:latest
+    container_name: flicker-test-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set minio http://minio:9001 minioadmin minioadmin;
+      mc mb minio/flicker-test --ignore-existing;
+      mc mb minio/flicker-api-test --ignore-existing;
+      echo '✓ MinIO buckets created: flicker-test, flicker-api-test';
+      exit 0;
+      "
+    networks:
+      - flicker-test
+
+volumes:
+  minio-data:
+    driver: local
+
+networks:
+  flicker-test:
+    driver: bridge

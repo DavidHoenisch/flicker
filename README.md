@@ -31,6 +31,15 @@ Capture logs directly from Docker containers:
 - Same buffering and filtering capabilities as file tailing
 - Ships to any supported destination
 
+### 🌐 API Tailing Support
+Pull audit logs and events from vendor APIs:
+- Perfect for onboarding SaaS vendors to your SIEM
+- Supports bearer token, basic auth, and custom headers
+- Automatic JSON parsing and log extraction
+- Pagination support (offset, cursor, and page-based)
+- Time-based filtering to fetch only new logs
+- State tracking with S3 for stateless deployments
+
 ### 🔍 Regex-Based Filtering
 Powerful filtering to ship only relevant logs:
 - **match_on**: Whitelist - only ship lines matching at least one pattern
@@ -221,6 +230,71 @@ docker_containers:
         cert_path: "/etc/flicker/certs/client.crt"
         key_path: "/etc/flicker/certs/client.key"
         ca_cert_path: "/etc/flicker/certs/ca.crt"
+
+api_sources:
+  # Example: Vendor API with Bearer token auth and offset pagination
+  - name: "vendor-audit-logs"
+    endpoint: "https://api.vendor.com/v1/audit/events"
+    polling_frequency_ms: 60000  # Poll every minute
+    buffer_size: 100
+    flush_interval_ms: 30000
+    results_field: "data"  # JSON path to log array
+    timestamp_field: "timestamp"  # Field containing event timestamp
+    message_field: "message"  # Optional: extract just the message field
+    api_key: "your_api_key_here"  # Bearer token authentication
+    time_filter_param: "since"  # Query param for time filtering
+    time_filter_format: "rfc3339"  # Timestamp format
+    pagination:
+      pagination_type: "offset"
+      limit_param: "limit"
+      offset_param: "offset"
+      page_size: 100
+    destination:
+      type: "http"
+      endpoint: "http://siem.company.com/ingest"
+      require_auth: true
+      api_key: "siem_api_key"
+
+  # Example: API with cursor-based pagination
+  - name: "saas-app-logs"
+    endpoint: "https://api.saasapp.com/logs"
+    polling_frequency_ms: 30000  # Poll every 30 seconds
+    buffer_size: 50
+    flush_interval_ms: 30000
+    results_field: "events"
+    timestamp_field: "created_at"
+    api_key: "saas_bearer_token"
+    time_filter_param: "start_time"
+    time_filter_format: "unix"
+    pagination:
+      pagination_type: "cursor"
+      cursor_param: "next_token"
+      next_cursor_field: "pagination.next_cursor"
+      page_size: 50
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "saas-logs"
+
+  # Example: Basic auth with custom headers
+  - name: "internal-api"
+    endpoint: "https://internal.company.com/api/v2/events"
+    polling_frequency_ms: 120000  # Poll every 2 minutes
+    buffer_size: 200
+    flush_interval_ms: 60000
+    results_field: "logs"
+    timestamp_field: "event_time"
+    basic:
+      username: "log_reader"
+      password: "secure_password"
+    headers:
+      X-Custom-Header: "custom-value"
+      X-Request-Source: "flicker"
+    time_filter_param: "from_time"
+    time_filter_format: "unix_ms"
+    destination:
+      type: "http"
+      endpoint: "http://log-processor:8080/ingest"
 ```
 
 ### Configuration Parameters
@@ -257,8 +331,49 @@ Array of Docker container configurations. Each entry supports:
 - **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
 - **`destination`** (object, required): Destination configuration (see below)
 
+#### `api_sources` (array, optional)
+Array of API source configurations for pulling audit logs from REST APIs. Each entry supports:
+
+- **`name`** (string, required): Unique identifier for this API source (used in registry for state tracking)
+- **`endpoint`** (string, required): API endpoint URL
+- **`polling_frequency_ms`** (integer, required): How often to poll the API (milliseconds)
+- **`buffer_size`** (integer, default: 100): Flush when buffer reaches this many lines
+- **`flush_interval_ms`** (integer, default: 30000): Flush after this many milliseconds
+- **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
+- **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
+- **`destination`** (object, required): Destination configuration (see below)
+
+**Authentication:**
+- **`api_key`** (string, optional): Bearer token or API key (sent as `Authorization: Bearer <token>`)
+- **`basic`** (object, optional): Basic authentication with `username` and `password`
+- **`headers`** (object, optional): Custom HTTP headers as key-value pairs
+
+**Response Parsing:**
+- **`results_field`** (string, required): JSON path to array of log entries (e.g., "data", "logs", "events")
+- **`timestamp_field`** (string, required): Field in each log entry containing the timestamp
+- **`message_field`** (string, optional): Field containing the log message (if not set, entire entry is serialized as JSON)
+
+**Time Filtering:**
+- **`time_filter_param`** (string, optional): Query parameter for filtering by time (e.g., "since", "start_time")
+- **`time_filter_format`** (string, optional): Time format: "unix", "unix_ms", or "rfc3339" (default: "rfc3339")
+
+**Pagination (optional):**
+- **`pagination`** (object, optional): Pagination configuration
+  - **`pagination_type`** (string, default: "offset"): Type of pagination: "offset", "cursor", or "page"
+  - **`page_size`** (integer, default: 100): Number of items per page
+  - **For offset-based:**
+    - **`limit_param`** (string): Query param for page size (e.g., "limit")
+    - **`offset_param`** (string): Query param for offset (e.g., "offset")
+  - **For cursor-based:**
+    - **`cursor_param`** (string): Query param for cursor (e.g., "cursor")
+    - **`next_cursor_field`** (string): Response field containing next cursor
+  - **For page-based:**
+    - **`page_param`** (string): Query param for page number (e.g., "page")
+    - **`next_page_field`** (string): Response field containing next page number
+    - **`has_more_field`** (string): Response field indicating if more pages exist
+
 #### `destination` (object)
-Destination configuration for both log files and Docker containers:
+Destination configuration for log files, Docker containers, and API sources:
 
 - **`type`** (string, required): Destination type: "http", "syslog", "elasticsearch", or "file"
 - **`endpoint`** (string, required for http): The HTTP endpoint to send logs to
@@ -287,6 +402,128 @@ Destination configuration for both log files and Docker containers:
 # Show help
 ./flicker --help
 ```
+
+### Registry Tracking (State Persistence)
+
+Flicker can persist file positions and container timestamps across restarts using a registry file. This prevents re-processing logs after Flicker restarts.
+
+#### Enable Registry Tracking
+```bash
+# Use local filesystem storage (default)
+./flicker --track --registry-file .flicker-registry.json
+
+# Use S3 storage
+./flicker --track --registry-file s3://my-bucket/flicker-registry.json
+```
+
+#### Local Filesystem Storage
+
+The simplest option - stores the registry as a JSON file on the local filesystem:
+
+```bash
+./flicker --track --registry-file /var/lib/flicker/registry.json
+```
+
+**Pros:**
+- Fast and simple
+- No external dependencies
+- Works offline
+
+**Cons:**
+- Lost if container/instance is terminated
+- Not suitable for stateless/ephemeral environments
+
+#### S3 Storage (Recommended for Stateless Containers)
+
+Store the registry in S3 or S3-compatible storage for stateless deployments:
+
+```bash
+./flicker --track --registry-file s3://my-bucket/path/to/registry.json
+```
+
+**Use cases:**
+- Running Flicker in stateless containers (Kubernetes, ECS, etc.)
+- Multi-instance deployments where state needs to be shared
+- Disaster recovery scenarios
+- Cloud-native deployments
+
+**Supported S3-Compatible Services:**
+- AWS S3
+- MinIO
+- Wasabi
+- DigitalOcean Spaces
+- Backblaze B2
+- Any S3-compatible object storage
+
+**Required Environment Variables:**
+
+For AWS S3:
+```bash
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_REGION="us-east-1"
+```
+
+For S3-compatible services (e.g., MinIO):
+```bash
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_REGION="us-east-1"  # Can be any value for compatible services
+export AWS_ENDPOINT_URL="https://minio.example.com"  # Custom endpoint
+export AWS_S3_FORCE_PATH_STYLE="true"  # Required for MinIO and some services
+```
+
+For EC2/ECS instances with IAM roles:
+```bash
+# No credentials needed - will use instance metadata
+export AWS_REGION="us-east-1"
+```
+
+**Docker Example with S3 Registry:**
+```bash
+docker run -e AWS_ACCESS_KEY_ID="..." \
+           -e AWS_SECRET_ACCESS_KEY="..." \
+           -e AWS_REGION="us-east-1" \
+           flicker:latest \
+           --track \
+           --registry-file s3://my-bucket/flicker-registry.json
+```
+
+**Kubernetes Example:**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: flicker
+spec:
+  containers:
+  - name: flicker
+    image: flicker:latest
+    args:
+      - "--track"
+      - "--registry-file"
+      - "s3://my-bucket/flicker-registry.json"
+    env:
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: aws-credentials
+          key: access-key-id
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: aws-credentials
+          key: secret-access-key
+    - name: AWS_REGION
+      value: "us-east-1"
+```
+
+**Registry Behavior:**
+- Registry is loaded once at startup
+- Updates are batched and written every 5 seconds (when dirty)
+- On S3, writes are atomic (no partial updates)
+- If the registry file doesn't exist, Flicker starts fresh
+- If the registry file is corrupted, Flicker starts fresh with a warning
 
 ### Running as a Service
 

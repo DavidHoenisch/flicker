@@ -18,12 +18,21 @@ pub struct ContainerPosition {
     pub last_timestamp: DateTime<Utc>,
 }
 
-/// The registry that tracks all file and container positions
+/// Represents a single API source's position in the registry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiPosition {
+    pub last_timestamp: DateTime<Utc>,
+    pub cursor: Option<String>, // For cursor-based pagination
+}
+
+/// The registry that tracks all file, container, and API positions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registry {
     pub version: u32,
     pub files: HashMap<String, FilePosition>,
     pub containers: HashMap<String, ContainerPosition>,
+    #[serde(default)]
+    pub api_sources: HashMap<String, ApiPosition>,
 }
 
 impl Registry {
@@ -33,10 +42,12 @@ impl Registry {
             version: 1,
             files: HashMap::new(),
             containers: HashMap::new(),
+            api_sources: HashMap::new(),
         }
     }
 
     /// Load registry from disk, returns empty registry if file doesn't exist or is corrupt
+    #[allow(dead_code)]
     pub fn load<P: AsRef<Path>>(path: P) -> Self {
         match fs::read_to_string(path.as_ref()) {
             Ok(contents) => match serde_json::from_str(&contents) {
@@ -65,6 +76,7 @@ impl Registry {
     }
 
     /// Save registry to disk atomically (write to temp file, then rename)
+    #[allow(dead_code)]
     pub fn save<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(self)?;
 
@@ -105,6 +117,27 @@ impl Registry {
     pub fn get_container_position(&self, container: &str) -> Option<ContainerPosition> {
         self.containers.get(container).cloned()
     }
+
+    /// Update an API source's position in the registry
+    pub fn update_api_source(
+        &mut self,
+        name: String,
+        last_timestamp: DateTime<Utc>,
+        cursor: Option<String>,
+    ) {
+        self.api_sources.insert(
+            name,
+            ApiPosition {
+                last_timestamp,
+                cursor,
+            },
+        );
+    }
+
+    /// Get an API source's position from the registry
+    pub fn get_api_position(&self, name: &str) -> Option<ApiPosition> {
+        self.api_sources.get(name).cloned()
+    }
 }
 
 /// Messages sent to the registry writer task
@@ -119,20 +152,34 @@ pub enum RegistryUpdate {
         container: String,
         last_timestamp: DateTime<Utc>,
     },
+    UpdateApiSource {
+        name: String,
+        last_timestamp: DateTime<Utc>,
+        cursor: Option<String>,
+    },
 }
 
-/// Registry writer task that receives updates via channel and persists to disk
-/// This task runs independently and batches writes to avoid excessive disk I/O
+/// Registry writer task that receives updates via channel and persists to storage
+/// This task runs independently and batches writes to avoid excessive I/O
 pub async fn registry_writer_task(
-    registry_path: String,
+    storage: std::sync::Arc<dyn crate::registry_storage::RegistryStorage>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<RegistryUpdate>,
 ) {
     use tokio::time::{Duration, interval};
 
-    let mut registry = Registry::load(&registry_path);
+    let mut registry = match storage.load().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "Failed to load registry: {}. Starting with empty registry.",
+                e
+            );
+            Registry::new()
+        }
+    };
     let mut dirty = false;
 
-    // Flush registry to disk every 5 seconds (or on shutdown)
+    // Flush registry to storage every 5 seconds (or on shutdown)
     let mut flush_interval = interval(Duration::from_secs(5));
 
     loop {
@@ -148,12 +195,16 @@ pub async fn registry_writer_task(
                         registry.update_container(container, last_timestamp);
                         dirty = true;
                     }
+                    RegistryUpdate::UpdateApiSource { name, last_timestamp, cursor } => {
+                        registry.update_api_source(name, last_timestamp, cursor);
+                        dirty = true;
+                    }
                 }
             }
-            // Periodic flush to disk
+            // Periodic flush to storage
             _ = flush_interval.tick() => {
                 if dirty {
-                    if let Err(e) = registry.save(&registry_path) {
+                    if let Err(e) = storage.save(&registry).await {
                         eprintln!("Failed to save registry: {}", e);
                     }
                     dirty = false;

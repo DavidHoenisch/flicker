@@ -56,10 +56,14 @@ fn default_max_queue_size() -> usize {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default)]
     pub log_files: Vec<LogFileConfig>,
 
     #[serde(default)]
     pub docker_containers: Vec<DockerContainerConfig>,
+
+    #[serde(default)]
+    pub api_sources: Vec<ApiSourceConfig>,
 
     #[serde(default)]
     pub retry: RetryConfigOptions,
@@ -101,6 +105,75 @@ pub struct DockerContainerConfig {
 
     #[serde(default)]
     pub exclude_on: Vec<String>, // List of regex patterns to exclude (empty = exclude none)
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ApiSourceConfig {
+    pub name: String,     // Unique identifier for this API source (used in registry)
+    pub endpoint: String, // API endpoint URL
+    pub polling_frequency_ms: u64,
+    pub destination: DestinationConfig,
+
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size: usize,
+
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+
+    #[serde(default)]
+    pub match_on: Vec<String>, // List of regex patterns to match (empty = match all)
+
+    #[serde(default)]
+    pub exclude_on: Vec<String>, // List of regex patterns to exclude (empty = exclude none)
+
+    // Authentication
+    pub api_key: Option<String>,  // Bearer token or API key
+    pub basic: Option<BasicAuth>, // Basic auth credentials
+    pub headers: Option<std::collections::HashMap<String, String>>, // Custom headers
+
+    // Response parsing
+    pub results_field: String, // JSON path to array of log entries (e.g., "data", "logs", "events")
+    pub timestamp_field: String, // Field in each log entry containing timestamp
+    pub message_field: Option<String>, // Field containing the log message (if None, serialize entire object)
+
+    // Pagination
+    pub pagination: Option<PaginationConfig>,
+
+    // Time filtering
+    #[serde(default)]
+    pub time_filter_param: Option<String>, // Query param for filtering by time (e.g., "since", "start_time")
+    #[serde(default)]
+    pub time_filter_format: Option<String>, // Time format: "unix", "unix_ms", "rfc3339" (default: "rfc3339")
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PaginationConfig {
+    #[serde(default = "default_pagination_type")]
+    pub pagination_type: String, // "offset", "cursor", or "page"
+
+    // For offset-based pagination
+    pub limit_param: Option<String>, // Query param for page size (e.g., "limit", "per_page")
+    pub offset_param: Option<String>, // Query param for offset (e.g., "offset")
+
+    // For cursor-based pagination
+    pub cursor_param: Option<String>, // Query param for cursor (e.g., "cursor", "next_token")
+    pub next_cursor_field: Option<String>, // Response field containing next cursor
+
+    // For page-based pagination
+    pub page_param: Option<String>, // Query param for page number (e.g., "page")
+    pub next_page_field: Option<String>, // Response field containing next page number
+    pub has_more_field: Option<String>, // Response field indicating if more pages exist
+
+    #[serde(default = "default_page_size")]
+    pub page_size: u32, // Number of items per page
+}
+
+fn default_pagination_type() -> String {
+    "offset".to_string()
+}
+
+fn default_page_size() -> u32 {
+    100
 }
 
 // Default: Flush every 100 lines

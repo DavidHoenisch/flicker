@@ -1,0 +1,34 @@
+# Test configuration for API tailing
+# This config connects to the mock API server (test-api-server.py)
+# and ships logs to the test receiver (test-receiver.py)
+
+api_sources:
+  - name: "mock-vendor-api"
+    endpoint: "http://localhost:9000/api/events"
+    polling_frequency_ms: 5000  # Poll every 5 seconds
+    buffer_size: 10
+    flush_interval_ms: 10000
+
+    # Response parsing
+    results_field: "data"  # JSON path to log array
+    timestamp_field: "timestamp"  # Field containing event timestamp
+    message_field: "message"  # Extract just the message field
+
+    # Time filtering
+    time_filter_param: "since"  # Query param for time filtering
+    time_filter_format: "rfc3339"  # Timestamp format
+
+    # Pagination (offset-based)
+    pagination:
+      pagination_type: "offset"
+      limit_param: "limit"
+      offset_param: "offset"
+      page_size: 20
+
+    # Destination
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+
+log_files: []
+docker_containers: []
