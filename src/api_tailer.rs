@@ -1,4 +1,4 @@
-use crate::config::{ApiSourceConfig, PaginationConfig};
+use crate::config::ApiSourceConfig;
 use crate::registry::RegistryUpdate;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -194,6 +194,9 @@ impl ApiTailer {
                     if latest_timestamp.is_none() || timestamp > latest_timestamp.unwrap() {
                         latest_timestamp = Some(timestamp);
                     }
+                } else {
+                    // Timestamp extraction failed - entry will be skipped
+                    // Warning is already logged in extract_timestamp()
                 }
             }
 
@@ -343,16 +346,39 @@ impl ApiTailer {
             }
         }
 
-        // Try unix timestamp as number
-        if let Some(unix_ts) = timestamp_value.as_i64() {
-            return DateTime::from_timestamp(unix_ts, 0);
+        // Try unix timestamp as number (i64)
+        if let Some(ts_num) = timestamp_value.as_i64() {
+            // Heuristic: determine if it's seconds, milliseconds, or microseconds
+            // based on the magnitude of the number
+
+            // Microseconds: > 1_000_000_000_000 (roughly > year 2001 in milliseconds)
+            // Example: 1766098059650950 (microseconds since epoch)
+            if ts_num > 1_000_000_000_000 {
+                // Try as microseconds first
+                let secs = ts_num / 1_000_000;
+                let nanos = ((ts_num % 1_000_000) * 1_000) as u32;
+                if let Some(dt) = DateTime::from_timestamp(secs, nanos) {
+                    return Some(dt);
+                }
+            }
+
+            // Milliseconds: > 1_000_000_000 (roughly > year 2001 in seconds)
+            // Example: 1766098059650 (milliseconds since epoch)
+            if ts_num > 1_000_000_000 {
+                if let Some(dt) = DateTime::from_timestamp_millis(ts_num) {
+                    return Some(dt);
+                }
+            }
+
+            // Seconds: assume anything else is seconds
+            // Example: 1766098059 (seconds since epoch)
+            return DateTime::from_timestamp(ts_num, 0);
         }
 
-        // Try unix timestamp in milliseconds
-        if let Some(unix_ms) = timestamp_value.as_i64() {
-            return DateTime::from_timestamp_millis(unix_ms);
-        }
-
+        eprintln!(
+            "Warning: Failed to parse timestamp field '{}' in API source '{}'. Value: {:?}",
+            config.timestamp_field, config.name, timestamp_value
+        );
         None
     }
 
