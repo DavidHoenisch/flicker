@@ -28,11 +28,16 @@ pub struct ApiPosition {
 /// The registry that tracks all file, container, and API positions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registry {
+    #[serde(default = "default_version")]
     pub version: u32,
     pub files: HashMap<String, FilePosition>,
     pub containers: HashMap<String, ContainerPosition>,
     #[serde(default)]
     pub api_sources: HashMap<String, ApiPosition>,
+}
+
+fn default_version() -> u32 {
+    1
 }
 
 impl Registry {

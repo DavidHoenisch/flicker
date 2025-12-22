@@ -165,16 +165,25 @@ impl ApiTailer {
                 .await
                 .context("Failed to parse JSON response")?;
 
+            eprintln!("[API Debug] Received response for '{}': {}", config.name,
+                serde_json::to_string(&body).unwrap_or_else(|_| "invalid json".to_string()));
+
             // Extract log entries from response
             let entries = self.extract_entries(&body, config)?;
+            eprintln!("[API Debug] Extracted {} entries from '{}'", entries.len(), config.name);
 
             // Process each entry
             for entry in entries {
                 // Extract timestamp
                 if let Some(timestamp) = self.extract_timestamp(&entry, config) {
+                    eprintln!("[API Debug] Entry timestamp: {}, last_timestamp: {:?}",
+                        timestamp, latest_timestamp);
+
                     // Only process entries after our last timestamp
                     if let Some(last_ts) = latest_timestamp {
                         if timestamp <= last_ts {
+                            eprintln!("[API Debug] Skipping entry - timestamp {} <= last_ts {}",
+                                timestamp, last_ts);
                             continue; // Skip this entry, we've already seen it
                         }
                     }
@@ -188,6 +197,7 @@ impl ApiTailer {
                         serde_json::to_string(&entry).unwrap_or_else(|_| entry.to_string())
                     };
 
+                    eprintln!("[API Debug] Adding log line to buffer (length: {})", log_line.len());
                     all_lines.push(log_line);
 
                     // Update latest timestamp
@@ -197,6 +207,7 @@ impl ApiTailer {
                 } else {
                     // Timestamp extraction failed - entry will be skipped
                     // Warning is already logged in extract_timestamp()
+                    eprintln!("[API Debug] Skipping entry - timestamp extraction failed");
                 }
             }
 
@@ -281,6 +292,7 @@ impl ApiTailer {
             }
         }
 
+        eprintln!("[API Debug] Returning {} log lines for '{}'", all_lines.len(), config.name);
         Ok(all_lines)
     }
 
