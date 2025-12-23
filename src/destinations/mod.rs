@@ -7,6 +7,7 @@
 pub mod elasticsearch;
 pub mod file;
 pub mod http;
+pub mod s3;
 pub mod syslog;
 
 use anyhow::Result;
@@ -70,6 +71,7 @@ pub fn create_destination(
                 .ok_or_else(|| anyhow::anyhow!("File destination requires 'path' field"))?;
             Ok(Box::new(file::FileDestination::new(path)?))
         }
+        "s3" => Ok(Box::new(s3::S3Destination::new(config)?)),
         _ => {
             anyhow::bail!("Unknown destination type: {}", config.dest_type)
         }
@@ -97,6 +99,9 @@ mod tests {
             url: None,
             index: None,
             path: None,
+            bucket: None,
+            prefix: None,
+            region: None,
         };
 
         let result = create_destination(&config);
@@ -119,6 +124,9 @@ mod tests {
             url: None,
             index: None,
             path: None,
+            bucket: None,
+            prefix: None,
+            region: None,
         };
 
         let result = create_destination(&config);
@@ -143,6 +151,9 @@ mod tests {
             url: None,
             index: None,
             path: None,
+            bucket: None,
+            prefix: None,
+            region: None,
         };
 
         let result = create_destination(&config);
@@ -165,6 +176,9 @@ mod tests {
             url: None,
             index: None,
             path: None,
+            bucket: None,
+            prefix: None,
+            region: None,
         };
 
         let result = create_destination(&config);
@@ -187,6 +201,9 @@ mod tests {
             url: Some("http://es:9200".to_string()),
             index: Some("logs".to_string()),
             path: None,
+            bucket: None,
+            prefix: None,
+            region: None,
         };
 
         let result = create_destination(&config);
@@ -209,6 +226,111 @@ mod tests {
             url: None,
             index: None,
             path: Some("/tmp/test-flicker.jsonl".to_string()),
+            bucket: None,
+            prefix: None,
+            region: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_s3_destination() {
+        let config = DestinationConfig {
+            dest_type: "s3".to_string(),
+            endpoint: None,
+            require_auth: None,
+            api_key: None,
+            basic: None,
+            compression: None,
+            tls: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: None,
+            bucket: Some("my-log-bucket".to_string()),
+            prefix: Some("logs/app/".to_string()),
+            region: Some("us-west-2".to_string()),
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_s3_destination_missing_bucket() {
+        let config = DestinationConfig {
+            dest_type: "s3".to_string(),
+            endpoint: None,
+            require_auth: None,
+            api_key: None,
+            basic: None,
+            compression: None,
+            tls: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: None,
+            bucket: None,
+            prefix: None,
+            region: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("bucket"));
+    }
+
+    #[test]
+    fn test_create_s3_destination_minimal() {
+        let config = DestinationConfig {
+            dest_type: "s3".to_string(),
+            endpoint: None,
+            require_auth: None,
+            api_key: None,
+            basic: None,
+            compression: None,
+            tls: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: None,
+            bucket: Some("my-bucket".to_string()),
+            prefix: None,
+            region: None,
+        };
+
+        let result = create_destination(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_s3_destination_with_all_fields() {
+        let config = DestinationConfig {
+            dest_type: "s3".to_string(),
+            endpoint: None,
+            require_auth: None,
+            api_key: None,
+            basic: None,
+            compression: None,
+            tls: None,
+            host: None,
+            port: None,
+            protocol: None,
+            url: None,
+            index: None,
+            path: None,
+            bucket: Some("my-bucket".to_string()),
+            prefix: Some("logs/".to_string()),
+            region: Some("us-east-1".to_string()),
         };
 
         let result = create_destination(&config);
@@ -231,6 +353,9 @@ mod tests {
             url: None,
             index: None,
             path: None,
+            bucket: None,
+            prefix: None,
+            region: None,
         };
 
         let result = create_destination(&config);

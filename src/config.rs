@@ -224,6 +224,11 @@ pub struct DestinationConfig {
 
     // File destination fields
     pub path: Option<String>, // Output file path
+
+    // S3 destination fields
+    pub bucket: Option<String>, // S3 bucket name
+    pub prefix: Option<String>, // Optional key prefix (e.g., "logs/myapp/")
+    pub region: Option<String>, // Optional AWS region
 }
 
 impl Config {
@@ -511,5 +516,65 @@ log_files:
         assert_eq!(tls.key_path, "/etc/flicker/client.key");
         assert!(tls.ca_cert_path.is_none());
         assert_eq!(tls.accept_invalid_certs, None);
+    }
+
+    #[test]
+    fn test_s3_destination_config() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "s3"
+      bucket: "my-log-bucket"
+      prefix: "logs/app/"
+      region: "us-west-2"
+    "#;
+
+        let config = Config::from_yaml(yaml).unwrap();
+        let dest = &config.log_files[0].destination;
+        assert_eq!(dest.dest_type, "s3");
+        assert_eq!(dest.bucket.as_ref().unwrap(), "my-log-bucket");
+        assert_eq!(dest.prefix.as_ref().unwrap(), "logs/app/");
+        assert_eq!(dest.region.as_ref().unwrap(), "us-west-2");
+    }
+
+    #[test]
+    fn test_s3_destination_config_minimal() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "s3"
+      bucket: "minimal-bucket"
+    "#;
+
+        let config = Config::from_yaml(yaml).unwrap();
+        let dest = &config.log_files[0].destination;
+        assert_eq!(dest.dest_type, "s3");
+        assert_eq!(dest.bucket.as_ref().unwrap(), "minimal-bucket");
+        assert!(dest.prefix.is_none());
+        assert!(dest.region.is_none());
+    }
+
+    #[test]
+    fn test_s3_destination_config_with_prefix_only() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "s3"
+      bucket: "test-bucket"
+      prefix: "myapp/logs/"
+    "#;
+
+        let config = Config::from_yaml(yaml).unwrap();
+        let dest = &config.log_files[0].destination;
+        assert_eq!(dest.dest_type, "s3");
+        assert_eq!(dest.bucket.as_ref().unwrap(), "test-bucket");
+        assert_eq!(dest.prefix.as_ref().unwrap(), "myapp/logs/");
+        assert!(dest.region.is_none());
     }
 }

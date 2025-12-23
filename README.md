@@ -229,7 +229,21 @@ docker_containers:
       tls:
         cert_path: "/etc/flicker/certs/client.crt"
         key_path: "/etc/flicker/certs/client.key"
-        ca_cert_path: "/etc/flicker/certs/ca.crt"
+         ca_cert_path: "/etc/flicker/certs/ca.crt"
+
+# S3 destination example
+# Note: AWS credentials are read from environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+# Supports S3-compatible services like MinIO by setting AWS_ENDPOINT_URL and AWS_S3_FORCE_PATH_STYLE
+- path: "/var/log/app.log"
+  polling_frequency_ms: 1000
+  buffer_size: 100
+  flush_interval_ms: 30000
+  destination:
+    type: "s3"
+    bucket: "my-logs-bucket"
+    prefix: "app-logs/"
+    region: "us-east-1"
+# Logs are stored as JSONL files with timestamped keys (e.g., app-logs/2023-12-03T14-23-45Z.jsonl)
 
 api_sources:
   # Example: Vendor API with Bearer token auth and offset pagination
@@ -375,7 +389,7 @@ Array of API source configurations for pulling audit logs from REST APIs. Each e
 #### `destination` (object)
 Destination configuration for log files, Docker containers, and API sources:
 
-- **`type`** (string, required): Destination type: "http", "syslog", "elasticsearch", or "file"
+- **`type`** (string, required): Destination type: "http", "syslog", "elasticsearch", "file", or "s3"
 - **`endpoint`** (string, required for http): The HTTP endpoint to send logs to
 - **`require_auth`** (boolean, optional for http): If true, requires either `api_key` or `basic` to be set
 - **`api_key`** (string, optional for http): A bearer token to include in the `Authorization` header
@@ -387,6 +401,9 @@ Destination configuration for log files, Docker containers, and API sources:
   - **`ca_cert_path`** (string, optional): Path to custom CA certificate for server verification
   - **`accept_invalid_certs`** (boolean, optional, default: false): Accept invalid/self-signed server certificates (not recommended for production)
 - **Other fields** (various): Destination-specific fields (see examples/flicker-example.yaml)
+- **`bucket`** (string, required for s3): S3 bucket name
+- **`prefix`** (string, optional for s3): S3 key prefix (e.g., "logs/myapp/")
+- **`region`** (string, optional for s3): AWS region (defaults to AWS_REGION environment variable)
 
 ## Usage
 
@@ -765,14 +782,15 @@ Your HTTP endpoint should:
 ## Limitations & Future Work
 
 ### Current Limitations
-1. **Limited destinations**: HTTP, syslog, Elasticsearch, and file are the only supported destinations
+1. **Limited destinations**: HTTP, syslog, Elasticsearch, file, and S3 are the only supported destinations
 
 ### Planned Enhancements
 - [X] Persistent state (registry file like Filebeat)
 - [X] Retry queue with exponential backoff
 - [X] gzip compression for HTTP payloads
 - [ ] Filtering/parsing (JSON parsing, field extraction)
-- [ ] Additional destinations (Kafka, S3)
+- [X] S3 destination for log archival
+- [ ] Additional destinations (Kafka, CloudWatch Logs)
 - [X] TLS/mTLS support (client certificates for mutual TLS authentication)
 - [X] Authentication schemes (Basic Auth, Bearer Token)
 

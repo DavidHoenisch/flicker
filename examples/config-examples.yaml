@@ -69,6 +69,30 @@ log_files:
     buffer_size: 50
     flush_interval_ms: 20000
     destination:
-      type: "elasticsearch"
-      url: "http://elasticsearch:9200"
-      index: "logs-nginx-error"
+       type: "elasticsearch"
+       url: "http://elasticsearch:9200"
+       index: "logs-nginx-error"
+
+  # Example 7: Basic S3 Destination
+  - path: "/var/log/myapp/s3.log"
+    polling_frequency_ms: 1000
+    buffer_size: 100
+    flush_interval_ms: 60000
+    destination:
+       type: "s3"
+       bucket: "my-log-bucket"
+       prefix: "logs/myapp/"  # Optional: S3 key prefix
+       region: "us-west-2"    # Optional: AWS region
+       # AWS credentials are loaded from environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+
+  # Example 8: Advanced S3 Destination for Long-term Archival
+  - path: "/var/log/myapp/archive.log"
+    polling_frequency_ms: 2000
+    buffer_size: 500  # Larger buffer for batching
+    flush_interval_ms: 300000  # 5 minutes for archival
+    destination:
+       type: "s3"
+       bucket: "archive-bucket"
+       prefix: "year=2023/month=12/day=01/"  # Structured prefix for partitioning
+       region: "us-east-1"
+       # For S3-compatible services (MinIO, etc.), set AWS_ENDPOINT_URL environment variable

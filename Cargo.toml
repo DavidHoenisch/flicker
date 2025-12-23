@@ -1,6 +1,6 @@
 [package]
 name = "flicker"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 
 [dependencies]
@@ -20,7 +20,10 @@ async-trait = "0.1"
 
 # HTTP Client (For HTTP/Elasticsearch destinations)
 # Use native-tls for mTLS client certificate support (provides Identity::from_pem())
-reqwest = { version = "0.11", features = ["json", "native-tls"], default-features = false }
+reqwest = { version = "0.11", features = [
+  "json",
+  "native-tls",
+], default-features = false }
 
 # OpenSSL (needed for reqwest native-tls)
 # Use vendored feature for cross-compilation compatibility
@@ -50,6 +53,9 @@ futures-util = "0.3"
 # Gzip compression (For HTTP payload compression)
 flate2 = "1.0"
 
+# UUID generation (For S3 object key uniqueness)
+uuid = { version = "1", features = ["v4"] }
+
 # AWS S3 SDK (For S3 registry storage)
 aws-sdk-s3 = "1"
 aws-config = "1"
@@ -59,8 +65,7 @@ aws-config = "1"
 tempfile = "3"
 
 [profile.release]
-opt-level = 's' # Optimize for size
-lto = true      # Link-Time Optimization
+opt-level = 's'   # Optimize for size
+lto = true        # Link-Time Optimization
 codegen-units = 1 # Minimize parallel compilation units
-strip = true    # Strip debug symbols
-
+strip = true      # Strip debug symbols
