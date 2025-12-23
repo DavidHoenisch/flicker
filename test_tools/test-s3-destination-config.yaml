@@ -1,0 +1,16 @@
+# Test configuration for file tailing with S3 destination
+# Ships logs to S3 bucket using MinIO
+
+log_files:
+  - path: "test_tools/test-s3-dest.log"
+    polling_frequency_ms: 500
+    buffer_size: 5
+    flush_interval_ms: 10000
+    destination:
+      type: "s3"
+      bucket: "flicker-logs"
+      prefix: "file-logs"
+      region: "us-east-1"
+
+api_sources: []
+docker_containers: []

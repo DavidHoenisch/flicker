@@ -29,10 +29,11 @@ services:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set minio http://minio:9001 minioadmin minioadmin;
-      mc mb minio/flicker-test --ignore-existing;
-      mc mb minio/flicker-api-test --ignore-existing;
-      echo '✓ MinIO buckets created: flicker-test, flicker-api-test';
+       mc alias set minio http://minio:9001 minioadmin minioadmin;
+       mc mb minio/flicker-test --ignore-existing;
+       mc mb minio/flicker-api-test --ignore-existing;
+       mc mb minio/flicker-logs --ignore-existing;
+       echo '✓ MinIO buckets created: flicker-test, flicker-api-test, flicker-logs';
       exit 0;
       "
     networks:

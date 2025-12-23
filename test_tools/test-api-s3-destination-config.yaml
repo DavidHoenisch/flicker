@@ -1,0 +1,35 @@
+# Test configuration for API tailing with S3 destination
+# Ships API logs to S3 bucket using MinIO
+
+api_sources:
+  - name: "mock-vendor-api-s3-dest"
+    endpoint: "http://localhost:9000/api/events"
+    polling_frequency_ms: 3000  # Poll every 3 seconds
+    buffer_size: 5
+    flush_interval_ms: 10000
+
+    # Response parsing
+    results_field: "data"
+    timestamp_field: "timestamp"
+    message_field: "message"
+
+    # Time filtering
+    time_filter_param: "since"
+    time_filter_format: "rfc3339"
+
+    # Pagination
+    pagination:
+      pagination_type: "offset"
+      limit_param: "limit"
+      offset_param: "offset"
+      page_size: 10
+
+    # S3 Destination
+    destination:
+      type: "s3"
+      bucket: "flicker-api-logs"
+      prefix: "api-logs"
+      region: "us-east-1"
+
+log_files: []
+docker_containers: []

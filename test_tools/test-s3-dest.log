@@ -1,0 +1,11 @@
+[Mon Dec 22 08:11:40 PM PST 2025] Initial log entry
+[2025-12-22 20:11:43.526] INFO  - Cache hit for key: user_7693
+[2025-12-22 20:11:45.527] WARN  - Cache hit for key: user_3969
+[2025-12-22 20:11:47.527] INFO  - Memory usage: 1763MB
+[2025-12-22 20:11:49.527] ERROR - HTTP request: GET /api/v1/users
+[2025-12-22 20:11:51.528] WARN  - Application started successfully
+[2025-12-22 20:11:53.528] DEBUG - Processing user request
+[2025-12-22 20:11:55.528] DEBUG - API response time: 308ms
+[2025-12-22 20:11:57.528] WARN  - Memory usage: 779MB
+[2025-12-22 20:11:59.529] ERROR - Memory usage: 1315MB
+[2025-12-22 20:12:01.529] DEBUG - Background job completed
