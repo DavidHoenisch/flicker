@@ -1,3 +1,4 @@
+use crate::masking::MaskingConfig;
 use serde::Deserialize;
 use std::fs;
 
@@ -86,6 +87,9 @@ pub struct LogFileConfig {
 
     #[serde(default)]
     pub exclude_on: Vec<String>, // List of regex patterns to exclude (empty = exclude none)
+
+    #[serde(default)]
+    pub masking: MaskingConfig, // Data masking and PII redaction configuration
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -105,6 +109,9 @@ pub struct DockerContainerConfig {
 
     #[serde(default)]
     pub exclude_on: Vec<String>, // List of regex patterns to exclude (empty = exclude none)
+
+    #[serde(default)]
+    pub masking: MaskingConfig, // Data masking and PII redaction configuration
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -125,6 +132,9 @@ pub struct ApiSourceConfig {
 
     #[serde(default)]
     pub exclude_on: Vec<String>, // List of regex patterns to exclude (empty = exclude none)
+
+    #[serde(default)]
+    pub masking: MaskingConfig, // Data masking and PII redaction configuration
 
     // Authentication
     pub api_key: Option<String>,  // Bearer token or API key
@@ -576,5 +586,51 @@ log_files:
         assert_eq!(dest.bucket.as_ref().unwrap(), "test-bucket");
         assert_eq!(dest.prefix.as_ref().unwrap(), "myapp/logs/");
         assert!(dest.region.is_none());
+    }
+
+    #[test]
+    fn test_masking_config_parsing() {
+        let yaml = r#"
+log_files:
+  - path: "./test.log"
+    polling_frequency_ms: 250
+    buffer_size: 5
+    flush_interval_ms: 5000
+    masking:
+      enabled: true
+      rules:
+        email:
+          enabled: true
+          action: "redact"
+          replacement: "[EMAIL]"
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+      type: "http"
+"#;
+
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(config.log_files.len(), 1);
+        assert!(config.log_files[0].masking.enabled);
+        assert!(config.log_files[0].masking.rules.email.is_some());
+
+        let email_rule = config.log_files[0].masking.rules.email.as_ref().unwrap();
+        assert!(email_rule.enabled);
+        assert_eq!(email_rule.action, "redact");
+        assert_eq!(email_rule.replacement.as_ref().unwrap(), "[EMAIL]");
+    }
+
+    #[test]
+    fn test_masking_config_disabled_by_default() {
+        let yaml = r#"
+log_files:
+  - path: "./test.log"
+    polling_frequency_ms: 250
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+      type: "http"
+"#;
+
+        let config = Config::from_yaml(yaml).unwrap();
+        assert!(!config.log_files[0].masking.enabled);
     }
 }

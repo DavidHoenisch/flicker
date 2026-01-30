@@ -3,6 +3,7 @@ mod config;
 mod destinations;
 mod docker_tailer;
 mod filter;
+mod masking;
 mod registry;
 mod registry_storage;
 mod retry_queue;
@@ -13,6 +14,7 @@ use crate::config::Config;
 use crate::destinations::{LogEntry, create_destination};
 use crate::docker_tailer::DockerTailer;
 use crate::filter::LogFilter;
+use crate::masking::MaskingEngine;
 use crate::registry::{Registry, registry_writer_task};
 use crate::registry_storage::{FileSystemStorage, RegistryStorage, S3Storage};
 use crate::retry_queue::RetryQueue;
@@ -122,6 +124,21 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+        let masking = match MaskingEngine::new(&log_file.masking) {
+            Ok(m) => {
+                if m.is_some() {
+                    println!("Masking enabled for {}", path);
+                } else {
+                    println!("Masking config present but no active rules for {}", path);
+                }
+                m
+            }
+            Err(e) => {
+                eprintln!("Failed to create masking engine for {}: {}", path, e);
+                continue; // Skip this file and continue with others
+            }
+        };
+
         // Get registry data if tracking is enabled
         let (registry_sender, initial_position) = if let Some((ref tx, ref registry)) = registry_tx
         {
@@ -182,13 +199,30 @@ async fn main() -> anyhow::Result<()> {
                 // Poll this file for new lines
                 match tailer.poll(&path) {
                     Ok(lines) => {
+                        let mut lines_read = 0;
+                        let mut lines_shipped = 0;
                         for line in lines {
+                            lines_read += 1;
                             if filter.should_ship(&line) {
+                                lines_shipped += 1;
+                                let masked_line = masking
+                                    .as_ref()
+                                    .map_or_else(|| line.clone(), |m| m.apply(&line));
                                 buffer.push(LogEntry {
                                     path: path.clone(),
-                                    line,
+                                    line: masked_line,
                                 });
                             }
+                        }
+
+                        if lines_read > 0 {
+                            println!(
+                                "[{}] Read {} lines, shipped {} (buffer: {})",
+                                path,
+                                lines_read,
+                                lines_shipped,
+                                buffer.len()
+                            );
                         }
 
                         let buffer_full = buffer.len() >= buffer_size;
@@ -256,6 +290,17 @@ async fn main() -> anyhow::Result<()> {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Failed to create filter for container {}: {}", container, e);
+                continue; // Skip this container and continue with others
+            }
+        };
+
+        let masking = match MaskingEngine::new(&docker_container.masking) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "Failed to create masking engine for container {}: {}",
+                    container, e
+                );
                 continue; // Skip this container and continue with others
             }
         };
@@ -339,9 +384,12 @@ async fn main() -> anyhow::Result<()> {
                     Ok(lines) => {
                         for line in lines {
                             if filter.should_ship(&line) {
+                                let masked_line = masking
+                                    .as_ref()
+                                    .map_or_else(|| line.clone(), |m| m.apply(&line));
                                 buffer.push(LogEntry {
                                     path: format!("docker://{}", container),
-                                    line,
+                                    line: masked_line,
                                 });
                             }
                         }
@@ -417,6 +465,17 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
+        let masking = match MaskingEngine::new(&api_source.masking) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "Failed to create masking engine for API source {}: {}",
+                    name, e
+                );
+                continue; // Skip this API source and continue with others
+            }
+        };
+
         // Get registry data if tracking is enabled
         let (registry_sender, initial_position) = if let Some((ref tx, ref registry)) = registry_tx
         {
@@ -490,9 +549,12 @@ async fn main() -> anyhow::Result<()> {
                     Ok(lines) => {
                         for line in lines {
                             if filter.should_ship(&line) {
+                                let masked_line = masking
+                                    .as_ref()
+                                    .map_or_else(|| line.clone(), |m| m.apply(&line));
                                 buffer.push(LogEntry {
                                     path: format!("api://{}", name),
-                                    line,
+                                    line: masked_line,
                                 });
                             }
                         }

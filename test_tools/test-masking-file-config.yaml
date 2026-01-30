@@ -1,0 +1,36 @@
+log_files:
+  - path: "./test-masking.log"
+    polling_frequency_ms: 250
+    buffer_size: 5
+    flush_interval_ms: 5000
+    masking:
+      enabled: true
+      rules:
+        email:
+          enabled: true
+          action: "redact"
+          replacement: "[EMAIL_REDACTED]"
+        credit_card:
+          enabled: true
+          action: "redact"
+          replacement: "[CC_REDACTED]"
+        ssn:
+          enabled: true
+          action: "redact"
+          replacement: "[SSN_REDACTED]"
+        phone:
+          enabled: true
+          action: "redact"
+          replacement: "[PHONE_REDACTED]"
+        ip_address:
+          enabled: true
+          action: "redact"
+          replacement: "[IP_REDACTED]"
+        custom:
+          - name: "session_token"
+            pattern: "session_token=[a-f0-9]{32}"
+            action: "redact"
+            replacement: "session_token=[TOKEN_REDACTED]"
+    destination:
+      type: "file"
+      path: "./test-masking-output.jsonl"

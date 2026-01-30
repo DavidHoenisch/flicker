@@ -1,0 +1,39 @@
+log_files:
+  # Test data masking and PII redaction
+  # This file will contain logs with sensitive data that should be masked
+
+  - path: "./test-masking.log"
+    polling_frequency_ms: 250
+    buffer_size: 5
+    flush_interval_ms: 5000
+    masking:
+      enabled: true
+      rules:
+        email:
+          enabled: true
+          action: "redact"
+          replacement: "[EMAIL_REDACTED]"
+        credit_card:
+          enabled: true
+          action: "redact"
+          replacement: "[CC_REDACTED]"
+        ssn:
+          enabled: true
+          action: "redact"
+          replacement: "[SSN_REDACTED]"
+        phone:
+          enabled: true
+          action: "redact"
+          replacement: "[PHONE_REDACTED]"
+        ip_address:
+          enabled: true
+          action: "redact"
+          replacement: "[IP_REDACTED]"
+        custom:
+          - name: "session_token"
+            pattern: "session_token=[a-f0-9]{32}"
+            action: "redact"
+            replacement: "session_token=[TOKEN_REDACTED]"
+    destination:
+      endpoint: "http://localhost:8000/ingest"
+      type: "http"

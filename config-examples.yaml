@@ -194,3 +194,86 @@ log_files:
       type: "elasticsearch"
       url: "http://elasticsearch:9200"
       index: "logs-nginx-error"
+
+  # ============================================================
+  # Example 12: DATA MASKING - PII Redaction
+  # Redact sensitive data like emails, credit cards, SSNs
+  # ============================================================
+  - path: "/var/log/app/user-events.log"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    masking:
+      enabled: true
+      rules:
+        email:
+          enabled: true
+          action: "redact"
+        credit_card:
+          enabled: true
+          action: "redact"
+        ssn:
+          enabled: true
+          action: "redact"
+    destination:
+      type: "elasticsearch"
+      url: "http://elasticsearch:9200"
+      index: "logs-user-events"
+
+  # ============================================================
+  # Example 13: DATA MASKING - Partial Masking
+  # Show last 4 digits of credit cards, mask the rest
+  # ============================================================
+  - path: "/var/log/app/payments.log"
+    polling_frequency_ms: 500
+    buffer_size: 50
+    flush_interval_ms: 30000
+    masking:
+      enabled: true
+      rules:
+        credit_card:
+          enabled: true
+          action: "partial"
+          partial_mask:
+            keep_last: 4
+            mask_char: "*"
+        email:
+          enabled: true
+          action: "partial"
+          partial_mask:
+            keep_last: 8
+    destination:
+      type: "http"
+      endpoint: "http://payment-processor:8080/logs"
+
+  # ============================================================
+  # Example 14: DATA MASKING - Custom Patterns
+  # Define custom regex patterns for application-specific data
+  # ============================================================
+  - path: "/var/log/app/api-requests.log"
+    polling_frequency_ms: 250
+    buffer_size: 100
+    flush_interval_ms: 30000
+    masking:
+      enabled: true
+      rules:
+        email:
+          enabled: true
+          action: "redact"
+        api_key:
+          enabled: true
+          action: "redact"
+        custom:
+          - name: "session_token"
+            pattern: "session_token=[a-f0-9]{32}"
+            action: "redact"
+            replacement: "session_token=[REDACTED]"
+          - name: "auth_header"
+            pattern: "Authorization:\\s*Bearer\\s+[a-zA-Z0-9_-]+"
+            action: "redact"
+            replacement: "Authorization: Bearer [REDACTED]"
+    destination:
+      type: "syslog"
+      host: "secure-syslog.local"
+      port: 514
+      protocol: "tcp"

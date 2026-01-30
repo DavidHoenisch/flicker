@@ -310,6 +310,42 @@ aws s3 cp s3://flicker-api-test/api-registry.json - --endpoint-url http://localh
 
 Press Ctrl+C to stop all processes (MinIO containers will be cleaned up automatically).
 
+#### Data Masking E2E
+**File:** `test-masking-e2e.sh`
+
+Automated test for data masking functionality that redacts PII from logs before shipping.
+
+```bash
+./test-masking-e2e.sh
+```
+
+**Prerequisites:**
+- None (uses standard test setup)
+
+**What it tests:**
+- Credit card number masking
+- Email address masking
+- Social Security Number (SSN) masking
+- Phone number masking
+- IP address masking
+- API key masking
+- UUID masking
+- JSON field-specific masking
+- Regex-based custom masking rules
+- Log buffering and shipping with masked data
+
+**Expected output format:**
+The receiver will display log batches where PII has been replaced with `[REDACTED]` or pattern-specific masks:
+```
+Credit card: 4111-XXXX-XXXX-1111 → 4111-[REDACTED]-1111
+Email: user@example.com → [REDACTED]@example.com
+SSN: 123-45-6789 → XXX-XX-6789
+Phone: +1-555-123-4567 → +1-XXX-XXX-4567
+IP: 192.168.1.100 → 192.168.xxx.xxx
+```
+
+Press Ctrl+C to stop all processes.
+
 ## Configuration Files
 
 ### docker-compose.yml
@@ -359,6 +395,16 @@ Features:
 - Uses S3 for registry state tracking
 - Simulates stateless container deployment
 - Offset-based pagination with time filtering
+
+### test-masking-config.yaml
+Configuration for testing data masking functionality.
+
+Features:
+- Enables masking for multiple PII types
+- Credit card, email, SSN, phone, IP, API key, and UUID masking
+- JSON field-specific masking rules
+- Custom regex-based masking patterns
+- Ships masked logs to test receiver
 
 ## Manual Testing Workflows
 
@@ -507,3 +553,15 @@ aws s3 cp s3://flicker-api-test/api-registry.json - --endpoint-url http://localh
 - [ ] API tailing + S3 registry → stateless deployment simulation
 - [ ] Test different destinations (HTTP, syslog, elasticsearch, file)
 - [ ] Test authentication end-to-end
+
+### Data Masking
+- [ ] Test credit card number masking
+- [ ] Test email address masking
+- [ ] Test SSN masking
+- [ ] Test phone number masking
+- [ ] Test IP address masking
+- [ ] Test API key masking
+- [ ] Test UUID masking
+- [ ] Test JSON field-specific masking
+- [ ] Test custom regex masking rules
+- [ ] Verify masked data is properly buffered and shipped
