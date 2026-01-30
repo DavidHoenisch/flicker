@@ -147,6 +147,7 @@ impl Registry {
 
 /// Messages sent to the registry writer task
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum RegistryUpdate {
     UpdateFile {
         path: String,

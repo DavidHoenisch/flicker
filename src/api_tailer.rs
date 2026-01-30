@@ -95,14 +95,14 @@ impl ApiTailer {
         let mut query_params: Vec<(String, String)> = Vec::new();
 
         // Add time filter if configured
-        if let Some(time_param) = &config.time_filter_param {
-            if let Some(since_time) = initial_timestamp {
-                let time_value = format_timestamp(
-                    since_time,
-                    config.time_filter_format.as_deref().unwrap_or("rfc3339"),
-                );
-                query_params.push((time_param.clone(), time_value));
-            }
+        if let Some(time_param) = &config.time_filter_param
+            && let Some(since_time) = initial_timestamp
+        {
+            let time_value = format_timestamp(
+                since_time,
+                config.time_filter_format.as_deref().unwrap_or("rfc3339"),
+            );
+            query_params.push((time_param.clone(), time_value));
         }
 
         // Handle pagination
@@ -130,10 +130,10 @@ impl ApiTailer {
                         }
                     }
                     "cursor" => {
-                        if let Some(cursor_param) = &pagination.cursor_param {
-                            if let Some(cursor_value) = &current_cursor {
-                                request_params.push((cursor_param.clone(), cursor_value.clone()));
-                            }
+                        if let Some(cursor_param) = &pagination.cursor_param
+                            && let Some(cursor_value) = &current_cursor
+                        {
+                            request_params.push((cursor_param.clone(), cursor_value.clone()));
                         }
                     }
                     "page" => {
@@ -189,14 +189,12 @@ impl ApiTailer {
                     );
 
                     // Only process entries after our last timestamp
-                    if let Some(last_ts) = latest_timestamp {
-                        if timestamp <= last_ts {
-                            eprintln!(
-                                "[API Debug] Skipping entry - timestamp {} <= last_ts {}",
-                                timestamp, last_ts
-                            );
-                            continue; // Skip this entry, we've already seen it
-                        }
+                    if let Some(last_ts) = latest_timestamp && timestamp <= last_ts {
+                        eprintln!(
+                            "[API Debug] Skipping entry - timestamp {} <= last_ts {}",
+                            timestamp, last_ts
+                        );
+                        continue; // Skip this entry, we've already seen it
                     }
 
                     // Extract log message
@@ -233,45 +231,39 @@ impl ApiTailer {
                         // If we got a full page, there might be more
                         if let Some(results_array) =
                             body.pointer(&format!("/{}", config.results_field))
+                            && let Some(array) = results_array.as_array()
+                            && array.len() == pagination.page_size as usize
                         {
-                            if let Some(array) = results_array.as_array() {
-                                if array.len() == pagination.page_size as usize {
-                                    has_more = true;
-                                    page_offset += pagination.page_size;
-                                }
-                            }
+                            has_more = true;
+                            page_offset += pagination.page_size;
                         }
                     }
                     "cursor" => {
-                        if let Some(next_cursor_field) = &pagination.next_cursor_field {
-                            if let Some(next_cursor) =
+                        if let Some(next_cursor_field) = &pagination.next_cursor_field
+                            && let Some(next_cursor) =
                                 self.extract_field_as_string(&body, next_cursor_field)
-                            {
-                                has_more = true;
-                                current_cursor = Some(next_cursor.clone());
-                                latest_cursor = Some(next_cursor);
-                            }
+                        {
+                            has_more = true;
+                            current_cursor = Some(next_cursor.clone());
+                            latest_cursor = Some(next_cursor);
                         }
                     }
                     "page" => {
-                        if let Some(has_more_field) = &pagination.has_more_field {
-                            if let Some(has_more_value) =
+                        if let Some(has_more_field) = &pagination.has_more_field
+                            && let Some(has_more_value) =
                                 body.pointer(&format!("/{}", has_more_field))
-                            {
-                                has_more = has_more_value.as_bool().unwrap_or(false);
-                                if has_more {
-                                    current_page += 1;
-                                }
+                        {
+                            has_more = has_more_value.as_bool().unwrap_or(false);
+                            if has_more {
+                                current_page += 1;
                             }
-                        } else if let Some(next_page_field) = &pagination.next_page_field {
-                            if let Some(next_page) =
+                        } else if let Some(next_page_field) = &pagination.next_page_field
+                            && let Some(next_page) =
                                 self.extract_field_as_string(&body, next_page_field)
-                            {
-                                if let Ok(next_page_num) = next_page.parse::<u32>() {
-                                    has_more = true;
-                                    current_page = next_page_num;
-                                }
-                            }
+                            && let Ok(next_page_num) = next_page.parse::<u32>()
+                        {
+                            has_more = true;
+                            current_page = next_page_num;
                         }
                     }
                     _ => {}
@@ -296,14 +288,12 @@ impl ApiTailer {
         }
 
         // Send registry update
-        if !all_lines.is_empty() {
-            if let Some(tx) = &self.registry_tx {
-                let _ = tx.send(RegistryUpdate::UpdateApiSource {
-                    name: config.name.clone(),
-                    last_timestamp: latest_timestamp.unwrap_or_else(Utc::now),
-                    cursor: latest_cursor,
-                });
-            }
+        if !all_lines.is_empty() && let Some(tx) = &self.registry_tx {
+            let _ = tx.send(RegistryUpdate::UpdateApiSource {
+                name: config.name.clone(),
+                last_timestamp: latest_timestamp.unwrap_or_else(Utc::now),
+                cursor: latest_cursor,
+            });
         }
 
         eprintln!(
@@ -394,10 +384,10 @@ impl ApiTailer {
 
             // Milliseconds: > 1_000_000_000 (roughly > year 2001 in seconds)
             // Example: 1766098059650 (milliseconds since epoch)
-            if ts_num > 1_000_000_000 {
-                if let Some(dt) = DateTime::from_timestamp_millis(ts_num) {
-                    return Some(dt);
-                }
+            if ts_num > 1_000_000_000
+                && let Some(dt) = DateTime::from_timestamp_millis(ts_num)
+            {
+                return Some(dt);
             }
 
             // Seconds: assume anything else is seconds
@@ -430,6 +420,6 @@ fn format_timestamp(dt: DateTime<Utc>, format: &str) -> String {
     match format {
         "unix" => dt.timestamp().to_string(),
         "unix_ms" => dt.timestamp_millis().to_string(),
-        "rfc3339" | _ => dt.to_rfc3339(),
+        _ => dt.to_rfc3339(),
     }
 }
