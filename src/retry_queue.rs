@@ -253,17 +253,18 @@ mod tests {
         queue.add_failed_batch(vec![create_test_entry("line 2")], 0); // 100ms delay
         queue.add_failed_batch(vec![create_test_entry("line 3")], 1); // 200ms delay
 
-        // After 110ms, only batch with retry_count=0 should be ready
-        std::thread::sleep(std::time::Duration::from_millis(110));
+        // After 150ms, only batch with retry_count=0 should be ready
+        std::thread::sleep(std::time::Duration::from_millis(150));
         let ready = queue.get_ready_batches();
         assert_eq!(ready.len(), 1);
 
-        // After another 100ms (210ms total), batch with retry_count=1 should be ready
+        // After another 100ms (250ms total), batch with retry_count=1 should be ready
+        // Note: Windows timing can be imprecise, so we use generous margins
         std::thread::sleep(std::time::Duration::from_millis(100));
         let ready = queue.get_ready_batches();
         assert_eq!(ready.len(), 1);
 
-        // After another 200ms (410ms total), batch with retry_count=2 should be ready
+        // After another 200ms (450ms total), batch with retry_count=2 should be ready
         std::thread::sleep(std::time::Duration::from_millis(200));
         let ready = queue.get_ready_batches();
         assert_eq!(ready.len(), 1);
