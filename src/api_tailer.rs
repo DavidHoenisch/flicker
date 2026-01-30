@@ -189,7 +189,9 @@ impl ApiTailer {
                     );
 
                     // Only process entries after our last timestamp
-                    if let Some(last_ts) = latest_timestamp && timestamp <= last_ts {
+                    if let Some(last_ts) = latest_timestamp
+                        && timestamp <= last_ts
+                    {
                         eprintln!(
                             "[API Debug] Skipping entry - timestamp {} <= last_ts {}",
                             timestamp, last_ts
@@ -288,7 +290,9 @@ impl ApiTailer {
         }
 
         // Send registry update
-        if !all_lines.is_empty() && let Some(tx) = &self.registry_tx {
+        if !all_lines.is_empty()
+            && let Some(tx) = &self.registry_tx
+        {
             let _ = tx.send(RegistryUpdate::UpdateApiSource {
                 name: config.name.clone(),
                 last_timestamp: latest_timestamp.unwrap_or_else(Utc::now),
