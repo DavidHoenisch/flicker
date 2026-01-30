@@ -40,6 +40,15 @@ Pull audit logs and events from vendor APIs:
 - Time-based filtering to fetch only new logs
 - State tracking with S3 for stateless deployments
 
+### 🎭 Data Masking & PII Redaction
+Protect sensitive data before shipping logs to external systems:
+- Enable/disable masking per log source
+- Built-in rules for common PII types: email, credit_card, ssn, phone, ip_address, api_key
+- Custom regex patterns for organization-specific data
+- Two masking modes: full redaction (replacement) or partial masking (show first/last N chars)
+- Configurable replacement text
+- Applied before buffering and shipping to destinations
+
 ### 🔍 Regex-Based Filtering
 Powerful filtering to ship only relevant logs:
 - **match_on**: Whitelist - only ship lines matching at least one pattern
@@ -191,6 +200,51 @@ log_files:
       host: "syslog-server.local"
       protocol: "udp"
 
+  # Application logs with PII masking
+  - path: "/var/log/myapp/user-activity.log"
+    polling_frequency_ms: 500
+    buffer_size: 100
+    flush_interval_ms: 30000
+    # Mask sensitive data before shipping
+    masking:
+      enabled: true
+      rules:
+        # Built-in rules
+        - type: "email"
+          action: "redact"
+          replacement: "[EMAIL_REDACTED]"
+        - type: "credit_card"
+          action: "partial"
+          show_first: 4
+          show_last: 4
+        - type: "ssn"
+          action: "redact"
+        - type: "phone"
+          action: "redact"
+        - type: "ip_address"
+          action: "redact"
+          replacement: "[IP_REDACTED]"
+        - type: "api_key"
+          action: "partial"
+          show_last: 4
+        # Custom patterns for organization-specific data
+        - type: "custom"
+          name: "employee_id"
+          pattern: "EMP-[0-9]{6}"
+          action: "redact"
+          replacement: "[EMP_ID]"
+        - type: "custom"
+          name: "internal_token"
+          pattern: "sk-[a-zA-Z0-9]{32}"
+          action: "partial"
+          show_first: 4
+          show_last: 4
+    destination:
+      type: "http"
+      endpoint: "http://log-aggregator:8000/ingest"
+      require_auth: true
+      api_key: "your_secret_token"
+
 docker_containers:
   # Capture logs from Docker containers by name or ID
   - container: "my-app-container"
@@ -333,6 +387,7 @@ Array of log file configurations. Each entry supports:
 - **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
 - **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
 - **`destination`** (object, required): Destination configuration (see below)
+- **`masking`** (object, optional): PII redaction configuration (see Masking section below)
 
 #### `docker_containers` (array, optional)
 Array of Docker container configurations. Each entry supports:
@@ -344,6 +399,7 @@ Array of Docker container configurations. Each entry supports:
 - **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
 - **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
 - **`destination`** (object, required): Destination configuration (see below)
+- **`masking`** (object, optional): PII redaction configuration (see Masking section below)
 
 #### `api_sources` (array, optional)
 Array of API source configurations for pulling audit logs from REST APIs. Each entry supports:
@@ -356,6 +412,9 @@ Array of API source configurations for pulling audit logs from REST APIs. Each e
 - **`match_on`** (array of strings, optional): List of regex patterns - only ship lines matching at least one
 - **`exclude_on`** (array of strings, optional): List of regex patterns - skip lines matching any
 - **`destination`** (object, required): Destination configuration (see below)
+
+**Data Masking (optional):**
+- **`masking`** (object, optional): PII redaction configuration (see Masking section below)
 
 **Authentication:**
 - **`api_key`** (string, optional): Bearer token or API key (sent as `Authorization: Bearer <token>`)
@@ -385,6 +444,98 @@ Array of API source configurations for pulling audit logs from REST APIs. Each e
     - **`page_param`** (string): Query param for page number (e.g., "page")
     - **`next_page_field`** (string): Response field containing next page number
     - **`has_more_field`** (string): Response field indicating if more pages exist
+
+#### `masking` (object, optional)
+PII redaction and data masking configuration for log files, Docker containers, and API sources. Masking is applied to each log line before buffering and shipping to the destination. This allows you to redact sensitive data before it leaves your infrastructure.
+
+- **`enabled`** (boolean, default: false): Enable or disable masking for this log source
+- **`rules`** (array, required if enabled): List of masking rules to apply. Rules are applied in order, and each rule can match and mask multiple occurrences in a single log line.
+
+**Rule Configuration:**
+
+Each rule in the `rules` array is an object with the following fields:
+
+- **`type`** (string, required): The type of masking rule. One of:
+  - `"email"` - Matches email addresses (e.g., `user@example.com`)
+  - `"credit_card"` - Matches credit card numbers (e.g., `1234-5678-9012-3456`)
+  - `"ssn"` - Matches Social Security Numbers (e.g., `123-45-6789`)
+  - `"phone"` - Matches phone numbers (e.g., `(555) 123-4567`, `+1-555-123-4567`)
+  - `"ip_address"` - Matches IPv4 and IPv6 addresses (e.g., `192.168.1.1`, `2001:0db8::1`)
+  - `"api_key"` - Matches common API key patterns (e.g., `api-key: abc123xyz456`)
+  - `"custom"` - Uses a custom regex pattern (requires `pattern` field)
+
+- **`name`** (string, required for `type: "custom"`, optional otherwise): A descriptive name for custom rules. Used in logs and debugging.
+
+- **`pattern`** (string, required for `type: "custom"`): A valid regex pattern for matching sensitive data. Example: `"EMP-[0-9]{6}"` to match employee IDs.
+
+- **`action`** (string, default: "redact"): The masking action to apply. One of:
+  - `"redact"` - Replace the entire match with the replacement text (default: `[REDACTED]`)
+  - `"partial"` - Show only the first N and last N characters, masking the middle
+
+- **`replacement`** (string, optional): The replacement text for `redact` action. Default is `[REDACTED]` or type-specific defaults (e.g., `[EMAIL_REDACTED]`).
+
+- **`show_first`** (integer, default: 0): For `action: "partial"`, the number of characters to show at the beginning of the match.
+
+- **`show_last`** (integer, default: 0): For `action: "partial"`, the number of characters to show at the end of the match.
+
+**Built-in Rule Examples:**
+
+```yaml
+masking:
+  enabled: true
+  rules:
+    # Full redaction with custom replacement
+    - type: "email"
+      action: "redact"
+      replacement: "[EMAIL_REDACTED]"
+    
+    # Partial masking - show first 4 and last 4 digits
+    - type: "credit_card"
+      action: "partial"
+      show_first: 4
+      show_last: 4
+    
+    # Default redaction (uses built-in replacement)
+    - type: "ssn"
+      action: "redact"
+```
+
+**Custom Pattern Examples:**
+
+```yaml
+masking:
+  enabled: true
+  rules:
+    # Redact employee IDs
+    - type: "custom"
+      name: "employee_id"
+      pattern: "EMP-[0-9]{6}"
+      action: "redact"
+      replacement: "[EMP_ID]"
+    
+    # Partial masking for internal tokens
+    - type: "custom"
+      name: "internal_token"
+      pattern: "sk-[a-zA-Z0-9]{32}"
+      action: "partial"
+      show_first: 4
+      show_last: 4
+```
+
+**How It Works:**
+
+1. Each log line is checked against all masking rules in order
+2. For each rule, all matches in the line are masked according to the action
+3. Multiple rules can match the same line (e.g., an email and an IP address in the same log entry)
+4. Masked log lines are then buffered and shipped to the destination
+5. The original log file is never modified - masking happens in memory during processing
+
+**Performance Considerations:**
+
+- Masking adds minimal overhead (regex matching is fast for typical log volumes)
+- Rules are compiled once at startup for efficiency
+- Consider using more specific patterns to reduce false positives
+- For high-volume logs, test the impact of complex regex patterns
 
 #### `destination` (object)
 Destination configuration for log files, Docker containers, and API sources:
