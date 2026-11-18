@@ -292,14 +292,20 @@ impl MaskingEngine {
     }
 
     fn apply_partial_mask(text: &str, keep_last: usize, mask_char: char) -> String {
-        let len = text.len();
+        // DESIGN CHOICE: Count chars, not bytes, so slicing never splits a
+        // multi-byte UTF-8 character (which would panic).
+        let len = text.chars().count();
         if len <= keep_last {
             return mask_char.to_string().repeat(len);
         }
 
         let masked_len = len - keep_last;
         let mask_str: String = mask_char.to_string().repeat(masked_len);
-        let visible_part = &text[masked_len..];
+        let visible_start = text
+            .char_indices()
+            .nth(masked_len)
+            .map_or(text.len(), |(i, _)| i);
+        let visible_part = &text[visible_start..];
 
         format!("{}{}", mask_str, visible_part)
     }
@@ -624,6 +630,17 @@ rules:
         let line = "Send to test@example.com";
         let result = engine.apply(line);
         assert_eq!(result, "Send to [EMAIL]");
+    }
+
+    #[test]
+    fn test_partial_masking_multibyte_utf8() {
+        assert_eq!(MaskingEngine::apply_partial_mask("José", 1, '*'), "***é");
+        assert_eq!(
+            MaskingEngine::apply_partial_mask("日本語テキスト", 2, '#'),
+            "#####スト"
+        );
+        assert_eq!(MaskingEngine::apply_partial_mask("é", 1, '*'), "*");
+        assert_eq!(MaskingEngine::apply_partial_mask("ab", 0, '*'), "**");
     }
 
     #[test]
