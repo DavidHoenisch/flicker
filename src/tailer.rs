@@ -1,20 +1,29 @@
 use crate::registry::RegistryUpdate;
 use std::collections::HashMap;
 use std::fs::{File, metadata};
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// Longest line held in memory; longer lines are shipped in chunks of this size
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// How long an unterminated last line may sit unchanged before it is shipped anyway
+const PARTIAL_LINE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Tracks state for a single file being tailed
 struct FileState {
     reader: BufReader<File>,
     position: u64, // Current byte offset in file
     inode: u64,    // To detect file rotation
+    /// Unterminated line at EOF: (its start offset, when first seen)
+    partial: Option<(u64, Instant)>,
 }
 
 /// Manages tailing multiple log files
 pub struct LogTailer {
     files: HashMap<PathBuf, FileState>,
     initial_positions: HashMap<String, (u64, u64)>, // path -> (position, inode)
+    partial_line_timeout: Duration,
 }
 
 impl LogTailer {
@@ -22,6 +31,7 @@ impl LogTailer {
         Self {
             files: HashMap::new(),
             initial_positions: HashMap::new(),
+            partial_line_timeout: PARTIAL_LINE_TIMEOUT,
         }
     }
 
@@ -68,6 +78,7 @@ impl LogTailer {
         let current_inode = 0; // Windows doesn't have inodes
 
         let current_size = metadata.len();
+        let partial_line_timeout = self.partial_line_timeout;
 
         // Check if we're already tracking this file
         if let Some(state) = self.files.get_mut(&path_buf) {
@@ -93,12 +104,37 @@ impl LogTailer {
             // Seek to last position (in case file handle was disturbed)
             state.reader.seek(SeekFrom::Start(state.position))?;
 
-            // DESIGN CHOICE: Read line-by-line instead of bulk read
-            // This ensures we always send complete lines, never partial
             // DESIGN CHOICE: Read raw bytes and decode lossily. read_line() errors on
             // invalid UTF-8, which would leave position stuck before the bad byte forever.
+            let mut pos = state.position;
             let mut buf = Vec::new();
-            while state.reader.read_until(b'\n', &mut buf)? > 0 {
+            loop {
+                buf.clear();
+                let n = (&mut state.reader)
+                    .take(MAX_LINE_BYTES as u64)
+                    .read_until(b'\n', &mut buf)?;
+                if n == 0 {
+                    break;
+                }
+
+                // DESIGN CHOICE: Only ship complete lines. If the writer is mid-line,
+                // leave the position at the line start and wait for the rest. Ship it
+                // anyway if it stays unterminated past the timeout (e.g. a final line
+                // with no newline) or reaches MAX_LINE_BYTES (bounds memory).
+                if !buf.ends_with(b"\n") && n < MAX_LINE_BYTES {
+                    match state.partial {
+                        Some((start, since))
+                            if start == pos && since.elapsed() >= partial_line_timeout => {}
+                        Some((start, _)) if start == pos => break,
+                        _ => {
+                            state.partial = Some((pos, Instant::now()));
+                            break;
+                        }
+                    }
+                }
+                state.partial = None;
+                pos += n as u64;
+
                 // Remove trailing newline
                 if buf.ends_with(b"\n") {
                     buf.pop();
@@ -108,11 +144,9 @@ impl LogTailer {
                 }
 
                 lines.push(String::from_utf8_lossy(&buf).into_owned());
-                buf.clear();
             }
 
-            // Update position after reading
-            state.position = state.reader.stream_position()?;
+            state.position = pos;
         } else {
             // First time seeing this file, open it
             let file = File::open(&path_buf)?;
@@ -143,6 +177,7 @@ impl LogTailer {
                     reader,
                     position,
                     inode: current_inode,
+                    partial: None,
                 },
             );
         }
@@ -276,6 +311,63 @@ mod tests {
         assert_eq!(lines1[0], "File1 Line1");
         assert_eq!(lines2.len(), 1);
         assert_eq!(lines2[0], "File2 Line1");
+    }
+
+    #[test]
+    fn test_tailer_waits_for_partial_line() {
+        let mut file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+
+        let mut tailer = LogTailer::new();
+        tailer.poll(&path).unwrap();
+
+        write!(file, "full line\nhalf a li").unwrap();
+        file.flush().unwrap();
+        assert_eq!(tailer.poll(&path).unwrap(), vec!["full line"]);
+        assert!(tailer.poll(&path).unwrap().is_empty());
+
+        writeln!(file, "ne").unwrap();
+        file.flush().unwrap();
+        assert_eq!(tailer.poll(&path).unwrap(), vec!["half a line"]);
+    }
+
+    #[test]
+    fn test_tailer_ships_stale_partial_line_after_timeout() {
+        let mut file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+
+        let mut tailer = LogTailer::new();
+        tailer.partial_line_timeout = Duration::from_millis(20);
+        tailer.poll(&path).unwrap();
+
+        write!(file, "no newline").unwrap();
+        file.flush().unwrap();
+        assert!(tailer.poll(&path).unwrap().is_empty());
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(tailer.poll(&path).unwrap(), vec!["no newline"]);
+
+        // Position moved past it
+        writeln!(file).unwrap();
+        writeln!(file, "next").unwrap();
+        file.flush().unwrap();
+        assert_eq!(tailer.poll(&path).unwrap(), vec!["", "next"]);
+    }
+
+    #[test]
+    fn test_tailer_splits_overlong_line() {
+        let mut file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+
+        let mut tailer = LogTailer::new();
+        tailer.poll(&path).unwrap();
+
+        let long = "x".repeat(MAX_LINE_BYTES + 10);
+        writeln!(file, "{}", long).unwrap();
+        file.flush().unwrap();
+        let lines = tailer.poll(&path).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), MAX_LINE_BYTES);
+        assert_eq!(lines[1].len(), 10);
     }
 
     #[test]
