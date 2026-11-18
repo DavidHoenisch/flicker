@@ -125,6 +125,22 @@ impl RetryQueue {
         ready
     }
 
+    /// Remove and return every queued batch regardless of backoff (for shutdown)
+    pub fn drain_all(&mut self) -> Vec<(u64, Vec<LogEntry>, u32)> {
+        self.queue
+            .drain(..)
+            .map(|b| (b.seq, b.entries, b.retry_count))
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// Re-add a batch that failed retry (increments retry count).
     /// Returns the seqs of any batches dropped (this one if max retries exceeded,
     /// or the oldest if the queue was full).

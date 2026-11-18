@@ -24,7 +24,9 @@ use crate::tailer::LogTailer;
 use clap::Parser;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
+use tokio::time;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -55,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Initialize registry if tracking is enabled
+    let mut registry_writer = None;
     let registry_tx = if args.track {
         // Detect storage backend based on registry_file value
         let storage: Arc<dyn RegistryStorage> = if args.registry_file.starts_with("s3://") {
@@ -88,16 +91,17 @@ async fn main() -> anyhow::Result<()> {
 
         // Spawn registry writer task
         let storage_clone = storage.clone();
-        tokio::spawn(async move {
+        registry_writer = Some(tokio::spawn(async move {
             registry_writer_task(storage_clone, rx).await;
-        });
+        }));
 
         Some((tx, registry))
     } else {
         None
     };
 
-    let mut handles = vec![];
+    let mut tasks = JoinSet::new();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let retry_config = cfg.retry.to_retry_config();
     let registry_sender = registry_tx.as_ref().map(|(tx, _)| tx.clone());
@@ -131,10 +135,11 @@ async fn main() -> anyhow::Result<()> {
             tailer.set_initial_position(path.clone(), pos.position, pos.inode);
         }
 
-        handles.push(tokio::spawn(run_source(
+        tasks.spawn(run_source(
             FileSource { tailer, path },
             pipeline,
-        )));
+            shutdown_rx.clone(),
+        ));
     }
 
     for docker_container in cfg.docker_containers {
@@ -172,10 +177,11 @@ async fn main() -> anyhow::Result<()> {
             tailer.set_initial_timestamp(container.clone(), pos.last_timestamp);
         }
 
-        handles.push(tokio::spawn(run_source(
+        tasks.spawn(run_source(
             DockerSource { tailer, container },
             pipeline,
-        )));
+            shutdown_rx.clone(),
+        ));
     }
 
     for api_source in cfg.api_sources {
@@ -213,23 +219,89 @@ async fn main() -> anyhow::Result<()> {
             tailer.set_initial_position(name.clone(), pos.last_timestamp, pos.cursor);
         }
 
-        handles.push(tokio::spawn(run_source(
+        tasks.spawn(run_source(
             ApiSource {
                 tailer,
                 config: api_source,
             },
             pipeline,
-        )));
+            shutdown_rx.clone(),
+        ));
     }
 
-    for handle in handles {
-        match handle.await {
-            Ok(_) => {} // Task completed (unreachable)
-            Err(e) => eprintln!("Task panicked: {}", e),
+    // Run until a shutdown signal arrives (or every source has stopped)
+    tokio::select! {
+        _ = shutdown_signal() => println!("Shutdown signal received"),
+        _ = join_all(&mut tasks) => {}
+    }
+
+    // DESIGN CHOICE: Give sources a bounded window to flush buffers and retry
+    // queues, so a hung destination can't block shutdown forever.
+    let _ = shutdown_tx.send(true);
+    if time::timeout(SHUTDOWN_GRACE_PERIOD, join_all(&mut tasks))
+        .await
+        .is_err()
+    {
+        eprintln!(
+            "Shutdown grace period ({:?}) exceeded, aborting remaining sources",
+            SHUTDOWN_GRACE_PERIOD
+        );
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+
+    // All sources are gone; dropping the last senders lets the registry writer
+    // do its final save and exit.
+    drop(registry_sender);
+    drop(registry_tx);
+    if let Some(writer) = registry_writer
+        && time::timeout(REGISTRY_SAVE_TIMEOUT, writer).await.is_err()
+    {
+        eprintln!("Timed out saving registry on shutdown");
+    }
+
+    println!("Flicker stopped");
+    Ok(())
+}
+
+/// Time allowed for sources to flush on shutdown
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(15);
+/// Time allowed for the final registry save
+const REGISTRY_SAVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait for every source task, reporting errors and panics
+async fn join_all(tasks: &mut JoinSet<anyhow::Result<()>>) {
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("Source task failed: {}", e),
+            Err(e) => eprintln!("Source task panicked: {}", e),
         }
     }
+}
 
-    Ok(())
+/// Resolve on Ctrl-C, or SIGTERM on unix
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to install SIGTERM handler: {}", e);
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Per-source settings shared by all source types

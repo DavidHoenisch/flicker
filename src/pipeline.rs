@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 use tokio::time;
 
 /// A pollable log source
@@ -160,107 +161,171 @@ impl CheckpointTracker {
     }
 }
 
-/// Run a source until it returns an error that can't be recovered from
-pub async fn run_source(mut source: impl Source, cfg: PipelineConfig) -> anyhow::Result<()> {
-    let label = source.label();
-    let entry_path = source.entry_path();
-    let mut retry_queue = RetryQueue::new(cfg.retry.clone());
-    let mut checkpoints = CheckpointTracker::default();
-    let mut interval = time::interval(cfg.polling_frequency);
-    let mut buffer: Vec<LogEntry> = Vec::with_capacity(cfg.buffer_size);
-    let mut last_flush = Instant::now();
+/// Per-source runtime state
+struct Runner<S: Source> {
+    source: S,
+    cfg: PipelineConfig,
+    label: String,
+    entry_path: String,
+    retry_queue: RetryQueue,
+    checkpoints: CheckpointTracker,
+    buffer: Vec<LogEntry>,
+    last_flush: Instant,
+}
 
-    loop {
-        interval.tick().await;
-
-        // First, try to send any batches from the retry queue
-        for (seq, entries, retry_count) in retry_queue.get_ready_batches() {
+impl<S: Source> Runner<S> {
+    /// Resend queued batches. `force` ignores backoff timers (used on shutdown).
+    async fn send_retries(&mut self, force: bool) {
+        let batches = if force {
+            self.retry_queue.drain_all()
+        } else {
+            self.retry_queue.get_ready_batches()
+        };
+        for (seq, entries, retry_count) in batches {
             println!(
                 "[Retry] Attempting to resend batch of {} entries from {} (retry {})",
                 entries.len(),
-                label,
+                self.label,
                 retry_count + 1
             );
 
-            if let Err(e) = cfg.destination.send_batch(entries.clone()).await {
-                eprintln!("[Retry] Failed to resend batch from {}: {}", label, e);
-                for dropped in retry_queue.retry_failed(seq, entries, retry_count) {
-                    checkpoints.resolve(dropped);
+            if let Err(e) = self.cfg.destination.send_batch(entries.clone()).await {
+                eprintln!("[Retry] Failed to resend batch from {}: {}", self.label, e);
+                for dropped in self.retry_queue.retry_failed(seq, entries, retry_count) {
+                    self.checkpoints.resolve(dropped);
                 }
             } else {
-                println!("[Retry] Successfully resent batch from {}", label);
-                checkpoints.resolve(seq);
+                println!("[Retry] Successfully resent batch from {}", self.label);
+                self.checkpoints.resolve(seq);
             }
         }
+    }
 
-        match source.poll().await {
+    async fn poll(&mut self) {
+        match self.source.poll().await {
             Ok(lines) => {
                 let lines_read = lines.len();
-                let before = buffer.len();
+                let before = self.buffer.len();
                 for line in lines {
-                    if cfg.filter.should_ship(&line) {
-                        let line = match &cfg.masking {
+                    if self.cfg.filter.should_ship(&line) {
+                        let line = match &self.cfg.masking {
                             Some(m) => m.apply(&line),
                             None => line,
                         };
-                        buffer.push(LogEntry {
-                            path: entry_path.clone(),
+                        self.buffer.push(LogEntry {
+                            path: self.entry_path.clone(),
                             line,
                         });
                     }
                 }
-                checkpoints.observe(source.checkpoint());
+                self.checkpoints.observe(self.source.checkpoint());
 
                 if lines_read > 0 {
                     println!(
                         "[{}] Read {} lines, shipped {} (buffer: {})",
-                        label,
+                        self.label,
                         lines_read,
-                        buffer.len() - before,
-                        buffer.len()
+                        self.buffer.len() - before,
+                        self.buffer.len()
                     );
                 }
             }
             Err(e) => {
-                eprintln!("Error polling {}: {}", label, e);
+                eprintln!("Error polling {}: {}", self.label, e);
             }
         }
+    }
 
-        let buffer_full = buffer.len() >= cfg.buffer_size;
-        let time_elapsed = last_flush.elapsed() >= cfg.flush_interval;
-
-        if buffer_full || (time_elapsed && !buffer.is_empty()) {
-            let reason = if buffer_full {
-                "buffer full"
-            } else {
-                "time elapsed"
-            };
-            println!(
-                "Flushing {} entries from {} ({})",
-                buffer.len(),
-                label,
-                reason
-            );
-
-            let seq = checkpoints.seal();
-            let batch = std::mem::take(&mut buffer);
-            if let Err(e) = cfg.destination.send_batch(batch.clone()).await {
-                eprintln!("Failed to ship batch from {}: {}", label, e);
-                if let Some(dropped) = retry_queue.add_failed_batch(seq, batch, 0) {
-                    checkpoints.resolve(dropped);
-                }
-            } else {
-                checkpoints.resolve(seq);
-            }
-            last_flush = Instant::now();
+    async fn flush(&mut self, reason: &str) {
+        if self.buffer.is_empty() {
+            return;
         }
+        println!(
+            "Flushing {} entries from {} ({})",
+            self.buffer.len(),
+            self.label,
+            reason
+        );
 
-        if let Some(cp) = checkpoints.take_committable(buffer.is_empty())
-            && let Some(tx) = &cfg.registry_tx
+        let seq = self.checkpoints.seal();
+        let batch = std::mem::take(&mut self.buffer);
+        if let Err(e) = self.cfg.destination.send_batch(batch.clone()).await {
+            eprintln!("Failed to ship batch from {}: {}", self.label, e);
+            if let Some(dropped) = self.retry_queue.add_failed_batch(seq, batch, 0) {
+                self.checkpoints.resolve(dropped);
+            }
+        } else {
+            self.checkpoints.resolve(seq);
+        }
+        self.last_flush = Instant::now();
+    }
+
+    fn commit_checkpoint(&mut self) {
+        if let Some(cp) = self.checkpoints.take_committable(self.buffer.is_empty())
+            && let Some(tx) = &self.cfg.registry_tx
         {
             let _ = tx.send(cp);
         }
     }
+
+    async fn tick(&mut self) {
+        self.send_retries(false).await;
+        self.poll().await;
+
+        if self.buffer.len() >= self.cfg.buffer_size {
+            self.flush("buffer full").await;
+        } else if self.last_flush.elapsed() >= self.cfg.flush_interval {
+            self.flush("time elapsed").await;
+        }
+
+        self.commit_checkpoint();
+    }
+
+    async fn shutdown(&mut self) {
+        println!("Shutting down {}, flushing buffers", self.label);
+        self.flush("shutdown").await;
+        self.send_retries(true).await;
+        self.commit_checkpoint();
+        if !self.retry_queue.is_empty() {
+            eprintln!(
+                "{}: {} undelivered batch(es) at shutdown; they will be re-read on restart if tracking is enabled",
+                self.label,
+                self.retry_queue.len()
+            );
+        }
+    }
+}
+
+/// Run a source until `shutdown` is signalled, then flush and return
+pub async fn run_source(
+    source: impl Source,
+    cfg: PipelineConfig,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let mut interval = time::interval(cfg.polling_frequency);
+    let mut runner = Runner {
+        label: source.label(),
+        entry_path: source.entry_path(),
+        retry_queue: RetryQueue::new(cfg.retry.clone()),
+        checkpoints: CheckpointTracker::default(),
+        buffer: Vec::with_capacity(cfg.buffer_size),
+        last_flush: Instant::now(),
+        source,
+        cfg,
+    };
+
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        tokio::select! {
+            _ = interval.tick() => runner.tick().await,
+            _ = shutdown.changed() => {}
+        }
+    }
+
+    runner.shutdown().await;
+    Ok(())
 }
 
 #[cfg(test)]
