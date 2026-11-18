@@ -578,6 +578,9 @@ Destination configuration for log files, Docker containers, and API sources:
 ./flicker --config /path/to/config.yaml
 ./flicker -c /path/to/config.yaml
 
+# Skip sources that fail to set up instead of exiting (default: exit on any error)
+./flicker --continue-on-error
+
 # Show help
 ./flicker --help
 ```

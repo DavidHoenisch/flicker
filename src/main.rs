@@ -42,6 +42,24 @@ struct Args {
     /// Examples: ".flicker-registry.json" or "s3://bucket/path/to/registry.json"
     #[arg(long, default_value = ".flicker-registry.json")]
     registry_file: String,
+
+    /// Skip sources that fail to set up (bad destination, filter, masking) instead of exiting
+    #[arg(long)]
+    continue_on_error: bool,
+}
+
+/// On a source setup error: skip the source with --continue-on-error, else abort startup.
+/// DESIGN CHOICE: Fail fast by default, so a typo (e.g. in a masking regex) can't
+/// silently disable shipping for a source while the process looks healthy.
+macro_rules! skip_or_fail {
+    ($continue_on_error:expr, $($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        if $continue_on_error {
+            eprintln!("{} (skipping)", msg);
+            continue;
+        }
+        return Err(anyhow::anyhow!(msg));
+    }};
 }
 
 #[tokio::main]
@@ -117,10 +135,7 @@ async fn main() -> anyhow::Result<()> {
             &registry_sender,
         ) {
             Ok(p) => p,
-            Err(e) => {
-                eprintln!("Failed to set up {}: {}", path, e);
-                continue; // Skip this file and continue with others
-            }
+            Err(e) => skip_or_fail!(args.continue_on_error, "Failed to set up {}: {}", path, e),
         };
 
         let mut tailer = LogTailer::new();
@@ -153,18 +168,17 @@ async fn main() -> anyhow::Result<()> {
             &registry_sender,
         ) {
             Ok(p) => p,
-            Err(e) => {
-                eprintln!("Failed to set up {}: {}", label, e);
-                continue; // Skip this container and continue with others
-            }
+            Err(e) => skip_or_fail!(args.continue_on_error, "Failed to set up {}: {}", label, e),
         };
 
         let mut tailer = match DockerTailer::new() {
             Ok(t) => t,
-            Err(e) => {
-                eprintln!("Failed to create Docker tailer for {}: {}", container, e);
-                continue;
-            }
+            Err(e) => skip_or_fail!(
+                args.continue_on_error,
+                "Failed to create Docker tailer for {}: {}",
+                container,
+                e
+            ),
         };
         if let Some(pos) = registry.and_then(|r| r.get_container_position(&container)) {
             tailer.set_initial_timestamp(container.clone(), pos.last_timestamp);
@@ -195,18 +209,17 @@ async fn main() -> anyhow::Result<()> {
             &registry_sender,
         ) {
             Ok(p) => p,
-            Err(e) => {
-                eprintln!("Failed to set up {}: {}", label, e);
-                continue; // Skip this API source and continue with others
-            }
+            Err(e) => skip_or_fail!(args.continue_on_error, "Failed to set up {}: {}", label, e),
         };
 
         let mut tailer = match ApiTailer::new() {
             Ok(t) => t,
-            Err(e) => {
-                eprintln!("Failed to create API tailer for {}: {}", name, e);
-                continue;
-            }
+            Err(e) => skip_or_fail!(
+                args.continue_on_error,
+                "Failed to create API tailer for {}: {}",
+                name,
+                e
+            ),
         };
         if let Some(pos) = registry.and_then(|r| r.get_api_position(&name)) {
             tailer.set_initial_position(name.clone(), pos.last_timestamp, pos.cursor);
@@ -222,10 +235,22 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    // Run until a shutdown signal arrives (or every source has stopped)
+    if tasks.is_empty() {
+        anyhow::bail!("No sources could be started");
+    }
+
+    // Run until a shutdown signal arrives or a source stops unexpectedly.
+    // DESIGN CHOICE: Sources only return on shutdown, so one ending early (error or
+    // panic) means it's no longer shipping. Stop everything and exit non-zero so a
+    // supervisor notices and restarts us, rather than limping on silently.
+    let mut source_failed = false;
     tokio::select! {
         _ = shutdown_signal() => println!("Shutdown signal received"),
-        _ = join_all(&mut tasks) => {}
+        Some(result) = tasks.join_next() => {
+            report_task_result(result);
+            eprintln!("A source stopped unexpectedly, shutting down");
+            source_failed = true;
+        }
     }
 
     // DESIGN CHOICE: Give sources a bounded window to flush buffers and retry
@@ -253,6 +278,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Timed out saving registry on shutdown");
     }
 
+    if source_failed {
+        anyhow::bail!("Exiting because a source stopped unexpectedly");
+    }
     println!("Flicker stopped");
     Ok(())
 }
@@ -265,11 +293,15 @@ const REGISTRY_SAVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Wait for every source task, reporting errors and panics
 async fn join_all(tasks: &mut JoinSet<anyhow::Result<()>>) {
     while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => eprintln!("Source task failed: {}", e),
-            Err(e) => eprintln!("Source task panicked: {}", e),
-        }
+        report_task_result(result);
+    }
+}
+
+fn report_task_result(result: Result<anyhow::Result<()>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("Source task failed: {}", e),
+        Err(e) => eprintln!("Source task panicked: {}", e),
     }
 }
 

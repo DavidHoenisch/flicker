@@ -268,9 +268,85 @@ pub struct DestinationConfig {
 
 impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let content = fs::read_to_string(path)?; // The '?' operator is "if err != nil { return err }"
-        let config = serde_yaml::from_str(&content)?;
+        let content = fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config {}: {}", path, e))?;
+        let config: Self = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", path, e))?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Check values that would otherwise panic or misbehave at runtime.
+    /// Reports every problem at once rather than the first.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let mut errors = Vec::new();
+
+        if self.log_files.is_empty()
+            && self.docker_containers.is_empty()
+            && self.api_sources.is_empty()
+        {
+            errors.push("no log_files, docker_containers or api_sources configured".to_string());
+        }
+
+        let sources = self
+            .log_files
+            .iter()
+            .map(|f| {
+                (
+                    format!("log file '{}'", f.path),
+                    f.path.is_empty(),
+                    f.polling_frequency_ms,
+                    f.buffer_size,
+                )
+            })
+            .chain(self.docker_containers.iter().map(|c| {
+                (
+                    format!("docker container '{}'", c.container),
+                    c.container.is_empty(),
+                    c.polling_frequency_ms,
+                    c.buffer_size,
+                )
+            }))
+            .chain(self.api_sources.iter().map(|a| {
+                (
+                    format!("api source '{}'", a.name),
+                    a.name.is_empty(),
+                    a.polling_frequency_ms,
+                    a.buffer_size,
+                )
+            }));
+        for (label, name_empty, polling_frequency_ms, buffer_size) in sources {
+            if name_empty {
+                errors.push(format!("{}: name/path must not be empty", label));
+            }
+            if polling_frequency_ms == 0 {
+                errors.push(format!("{}: polling_frequency_ms must be > 0", label));
+            }
+            if buffer_size == 0 {
+                errors.push(format!("{}: buffer_size must be > 0", label));
+            }
+        }
+
+        // API source names key the registry, so they must be unique
+        let mut seen = std::collections::HashSet::new();
+        for api in &self.api_sources {
+            if !seen.insert(&api.name) {
+                errors.push(format!("api source '{}': duplicate name", api.name));
+            }
+        }
+
+        if self.retry.max_queue_size == 0 {
+            errors.push(
+                "retry.max_queue_size must be > 0 (reading pauses while the queue is full)"
+                    .to_string(),
+            );
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("Invalid config:\n  - {}", errors.join("\n  - "))
+        }
     }
 
     #[cfg(test)]
@@ -701,5 +777,65 @@ log_files:
 
         let config = Config::from_yaml(yaml).unwrap();
         assert!(!config.log_files[0].masking.enabled);
+    }
+
+    #[test]
+    fn test_validate_accepts_minimal_config() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "file"
+      path: "/tmp/out.log"
+        "#;
+        assert!(Config::from_yaml(yaml).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_values() {
+        let yaml = r#"
+retry:
+  max_queue_size: 0
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 0
+    buffer_size: 0
+    destination:
+      type: "file"
+      path: "/tmp/out.log"
+api_sources:
+  - name: dup
+    endpoint: "http://localhost"
+    polling_frequency_ms: 1000
+    results_field: data
+    timestamp_field: ts
+    destination: { type: file, path: /tmp/a }
+  - name: dup
+    endpoint: "http://localhost"
+    polling_frequency_ms: 1000
+    results_field: data
+    timestamp_field: ts
+    destination: { type: file, path: /tmp/a }
+        "#;
+        let err = Config::from_yaml(yaml)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("polling_frequency_ms must be > 0"), "{}", err);
+        assert!(err.contains("buffer_size must be > 0"), "{}", err);
+        assert!(err.contains("duplicate name"), "{}", err);
+        assert!(err.contains("max_queue_size"), "{}", err);
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_config() {
+        let err = Config::from_yaml("{}")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no log_files"), "{}", err);
     }
 }
