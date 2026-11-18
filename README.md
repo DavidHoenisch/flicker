@@ -467,16 +467,16 @@ Each rule in the `rules` array is an object with the following fields:
 
 - **`type`** (string, required): The type of masking rule. One of:
   - `"email"` - Matches email addresses (e.g., `user@example.com`)
-  - `"credit_card"` - Matches credit card numbers (e.g., `1234-5678-9012-3456`)
+  - `"credit_card"` - Matches credit card numbers (e.g., `4111-1111-1111-1111`); requires a valid Luhn checksum and issuer prefix, so timestamps and IDs aren't masked
   - `"ssn"` - Matches Social Security Numbers (e.g., `123-45-6789`)
-  - `"phone"` - Matches phone numbers (e.g., `(555) 123-4567`, `+1-555-123-4567`)
+  - `"phone"` - Matches phone numbers with separators or a `+` prefix (e.g., `(555) 123-4567`, `+1-555-123-4567`, `+442071234567`); bare digit runs are not matched
   - `"ip_address"` - Matches IPv4 and IPv6 addresses (e.g., `192.168.1.1`, `2001:0db8::1`)
-  - `"api_key"` - Matches common API key patterns (e.g., `api-key: abc123xyz456`)
+  - `"api_key"` - Matches secrets assigned to keys like `api_key`, `token`, `secret`, `password` (case-insensitive, including prefixed names like `DB_PASSWORD`), `Bearer`/`Basic` authorization values, and AWS access key IDs. Only the value is masked (`password=[API_KEY]`)
   - `"custom"` - Uses a custom regex pattern (requires `pattern` field)
 
 - **`name`** (string, required for `type: "custom"`, optional otherwise): A descriptive name for custom rules. Used in logs and debugging.
 
-- **`pattern`** (string, required for `type: "custom"`): A valid regex pattern for matching sensitive data. Example: `"EMP-[0-9]{6}"` to match employee IDs.
+- **`pattern`** (string, required for `type: "custom"`): A valid regex pattern for matching sensitive data. Example: `"EMP-[0-9]{6}"` to match employee IDs. If the pattern has a named group `(?P<mask>...)`, only that group is masked (e.g. `"session=(?P<mask>[a-f0-9]{32})"`).
 
 - **`action`** (string, default: "redact"): The masking action to apply. One of:
   - `"redact"` - Replace the entire match with the replacement text (default: `[REDACTED]`)
