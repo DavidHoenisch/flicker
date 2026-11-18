@@ -79,6 +79,9 @@ logs don't sit in the buffer indefinitely.
 - Exponential backoff prevents overwhelming failed destinations
 - Configurable retry limits and delays
 - Per-source retry queue to isolate failures
+- In-order delivery: new batches wait behind ones still being retried
+- Back-pressure: reading pauses while the retry queue is full instead of dropping data
+- Optional dead-letter file for batches that exhaust their retries
 
 ### 📊 Efficient Tailing
 - Seek-based reading (only reads new content)
@@ -144,7 +147,8 @@ retry:
   max_retries: 5           # Maximum retry attempts before dropping a batch
   initial_delay_ms: 1000   # Initial retry delay (1 second)
   max_delay_ms: 60000      # Maximum retry delay (60 seconds)
-  max_queue_size: 100      # Maximum batches to keep in retry queue
+  max_queue_size: 100      # Queue length at which reading pauses (back-pressure)
+  # dead_letter_path: "/var/lib/flicker/dead-letter.jsonl"  # Optional: keep dropped batches
 
 log_files:
   # High-volume application logs
@@ -376,9 +380,10 @@ Global retry configuration for all log sources:
 - **`max_retries`** (integer, default: 5): Maximum number of retry attempts before dropping a batch
 - **`initial_delay_ms`** (integer, default: 1000): Initial delay before first retry in milliseconds
 - **`max_delay_ms`** (integer, default: 60000): Maximum delay between retries in milliseconds (caps exponential growth)
-- **`max_queue_size`** (integer, default: 100): Maximum number of batches to keep in retry queue per source
+- **`max_queue_size`** (integer, default: 100): Number of queued batches per source at which reading pauses until the destination recovers
+- **`dead_letter_path`** (string, optional): JSONL file that batches dropped after `max_retries` are appended to
 
-The retry logic uses exponential backoff: each retry doubles the delay time (1s, 2s, 4s, 8s, 16s...) until it reaches `max_delay_ms`. If a batch exceeds `max_retries`, it will be dropped and logged. If the retry queue reaches `max_queue_size`, the oldest batch will be dropped to make room.
+The retry logic uses exponential backoff: each retry doubles the delay time (1s, 2s, 4s, 8s, 16s...) until it reaches `max_delay_ms`. Batches are retried oldest-first and new batches queue behind them, so delivery stays in order. If a batch exceeds `max_retries`, it is dropped (written to `dead_letter_path` if set) and logged. If the retry queue reaches `max_queue_size`, the source stops reading new lines (its position doesn't advance) until the queue drains, so nothing is dropped for lack of space.
 
 #### `log_files` (array)
 Array of log file configurations. Each entry supports:

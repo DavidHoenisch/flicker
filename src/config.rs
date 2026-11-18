@@ -16,6 +16,10 @@ pub struct RetryConfigOptions {
 
     #[serde(default = "default_max_queue_size")]
     pub max_queue_size: usize,
+
+    /// Optional JSONL file for batches dropped after max_retries
+    #[serde(default)]
+    pub dead_letter_path: Option<String>,
 }
 
 impl Default for RetryConfigOptions {
@@ -25,6 +29,7 @@ impl Default for RetryConfigOptions {
             initial_delay_ms: default_initial_delay_ms(),
             max_delay_ms: default_max_delay_ms(),
             max_queue_size: default_max_queue_size(),
+            dead_letter_path: None,
         }
     }
 }
@@ -36,6 +41,7 @@ impl RetryConfigOptions {
             initial_delay_ms: self.initial_delay_ms,
             max_delay_ms: self.max_delay_ms,
             max_queue_size: self.max_queue_size,
+            dead_letter_path: self.dead_letter_path.clone(),
         }
     }
 }

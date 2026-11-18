@@ -10,7 +10,7 @@ use crate::docker_tailer::DockerTailer;
 use crate::filter::LogFilter;
 use crate::masking::MaskingEngine;
 use crate::registry::RegistryUpdate;
-use crate::retry_queue::{RetryConfig, RetryQueue};
+use crate::retry_queue::{RetryBatch, RetryConfig, RetryQueue};
 use crate::tailer::LogTailer;
 use async_trait::async_trait;
 use std::collections::VecDeque;
@@ -171,34 +171,69 @@ struct Runner<S: Source> {
     checkpoints: CheckpointTracker,
     buffer: Vec<LogEntry>,
     last_flush: Instant,
+    /// Reading paused because the retry queue is full
+    paused: bool,
+    /// Entries dropped after exceeding max retries
+    dropped_entries: u64,
 }
 
 impl<S: Source> Runner<S> {
-    /// Resend queued batches. `force` ignores backoff timers (used on shutdown).
+    /// Resend queued batches oldest-first, stopping at the first failure.
+    /// `force` ignores the backoff timer (used on shutdown).
     async fn send_retries(&mut self, force: bool) {
-        let batches = if force {
-            self.retry_queue.drain_all()
-        } else {
-            self.retry_queue.get_ready_batches()
-        };
-        for (seq, entries, retry_count) in batches {
-            println!(
-                "[Retry] Attempting to resend batch of {} entries from {} (retry {})",
-                entries.len(),
-                self.label,
-                retry_count + 1
-            );
+        while let Some(batch) = self.retry_queue.ready(force) {
+            let (seq, entries) = (batch.seq, batch.entries.clone());
+            if batch.failures > 0 {
+                println!(
+                    "[Retry] Attempting to resend batch of {} entries from {} (retry {})",
+                    entries.len(),
+                    self.label,
+                    batch.failures
+                );
+            }
 
-            if let Err(e) = self.cfg.destination.send_batch(entries.clone()).await {
-                eprintln!("[Retry] Failed to resend batch from {}: {}", self.label, e);
-                for dropped in self.retry_queue.retry_failed(seq, entries, retry_count) {
-                    self.checkpoints.resolve(dropped);
+            match self.cfg.destination.send_batch(entries).await {
+                Ok(()) => {
+                    self.retry_queue.ack();
+                    self.checkpoints.resolve(seq);
                 }
-            } else {
-                println!("[Retry] Successfully resent batch from {}", self.label);
-                self.checkpoints.resolve(seq);
+                Err(e) => {
+                    eprintln!("[Retry] Failed to resend batch from {}: {}", self.label, e);
+                    if let Some(dropped) = self.retry_queue.fail() {
+                        self.drop_batch(dropped);
+                    }
+                    break;
+                }
             }
         }
+    }
+
+    /// Record a batch that will never be delivered
+    fn drop_batch(&mut self, batch: RetryBatch) {
+        self.dropped_entries += batch.entries.len() as u64;
+        match self.retry_queue.dead_letter(&batch) {
+            Ok(true) => eprintln!(
+                "{}: wrote {} undeliverable entries to dead-letter file ({} dropped total)",
+                self.label,
+                batch.entries.len(),
+                self.dropped_entries
+            ),
+            Ok(false) => eprintln!(
+                "{}: dropped {} undeliverable entries ({} dropped total); set retry.dead_letter_path to keep them",
+                self.label,
+                batch.entries.len(),
+                self.dropped_entries
+            ),
+            Err(e) => eprintln!(
+                "{}: failed to write dead-letter file, dropped {} entries ({} dropped total): {}",
+                self.label,
+                batch.entries.len(),
+                self.dropped_entries,
+                e
+            ),
+        }
+        // Lost either way; don't let it hold back the registry position
+        self.checkpoints.resolve(batch.seq);
     }
 
     async fn poll(&mut self) {
@@ -249,15 +284,20 @@ impl<S: Source> Runner<S> {
 
         let seq = self.checkpoints.seal();
         let batch = std::mem::take(&mut self.buffer);
+        self.last_flush = Instant::now();
+
+        // Keep delivery in order: wait behind batches that are still being retried
+        if !self.retry_queue.is_empty() {
+            self.retry_queue.enqueue(seq, batch);
+            return;
+        }
+
         if let Err(e) = self.cfg.destination.send_batch(batch.clone()).await {
             eprintln!("Failed to ship batch from {}: {}", self.label, e);
-            if let Some(dropped) = self.retry_queue.add_failed_batch(seq, batch, 0) {
-                self.checkpoints.resolve(dropped);
-            }
+            self.retry_queue.add_failed_batch(seq, batch);
         } else {
             self.checkpoints.resolve(seq);
         }
-        self.last_flush = Instant::now();
     }
 
     fn commit_checkpoint(&mut self) {
@@ -270,6 +310,26 @@ impl<S: Source> Runner<S> {
 
     async fn tick(&mut self) {
         self.send_retries(false).await;
+
+        // DESIGN CHOICE: Back-pressure. With the retry queue full, stop reading (the
+        // source position stays put) rather than dropping batches to make room.
+        if self.retry_queue.is_full() {
+            if !self.paused {
+                eprintln!(
+                    "{}: retry queue full ({} batches), pausing reads until the destination recovers",
+                    self.label,
+                    self.retry_queue.len()
+                );
+                self.paused = true;
+            }
+            self.commit_checkpoint();
+            return;
+        }
+        if self.paused {
+            println!("{}: retry queue drained, resuming reads", self.label);
+            self.paused = false;
+        }
+
         self.poll().await;
 
         if self.buffer.len() >= self.cfg.buffer_size {
@@ -310,6 +370,8 @@ pub async fn run_source(
         checkpoints: CheckpointTracker::default(),
         buffer: Vec::with_capacity(cfg.buffer_size),
         last_flush: Instant::now(),
+        paused: false,
+        dropped_entries: 0,
         source,
         cfg,
     };
@@ -398,5 +460,110 @@ mod tests {
 
         t.resolve(seq);
         assert_eq!(position(t.take_committable(true)), Some(20));
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Emits one numbered line per poll
+    struct CountingSource {
+        polls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Source for CountingSource {
+        fn label(&self) -> String {
+            "test".to_string()
+        }
+        fn entry_path(&self) -> String {
+            "test".to_string()
+        }
+        async fn poll(&mut self) -> anyhow::Result<Vec<String>> {
+            let n = self.polls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![format!("line{}", n)])
+        }
+        fn checkpoint(&self) -> Option<RegistryUpdate> {
+            None
+        }
+    }
+
+    /// Records delivered lines; fails while `up` is false
+    struct FlakyDestination {
+        up: Arc<AtomicBool>,
+        received: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Destination for FlakyDestination {
+        async fn send(&self, entry: LogEntry) -> anyhow::Result<()> {
+            self.send_batch(vec![entry]).await
+        }
+        async fn send_batch(&self, entries: Vec<LogEntry>) -> anyhow::Result<()> {
+            if !self.up.load(Ordering::SeqCst) {
+                anyhow::bail!("destination down");
+            }
+            let mut received = self.received.lock().unwrap();
+            received.extend(entries.into_iter().map(|e| e.line));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_backpressure_and_in_order_delivery() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let up = Arc::new(AtomicBool::new(false));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let cfg = PipelineConfig {
+            polling_frequency: Duration::from_millis(1),
+            buffer_size: 1,
+            flush_interval: Duration::from_secs(60),
+            filter: LogFilter::new(vec![], vec![]).unwrap(),
+            masking: None,
+            destination: Box::new(FlakyDestination {
+                up: up.clone(),
+                received: received.clone(),
+            }),
+            retry: RetryConfig {
+                max_retries: 1000,
+                initial_delay_ms: 0,
+                max_delay_ms: 0,
+                max_queue_size: 3,
+                dead_letter_path: None,
+            },
+            registry_tx: None,
+        };
+        let source = CountingSource {
+            polls: polls.clone(),
+        };
+        let mut runner = Runner {
+            label: source.label(),
+            entry_path: source.entry_path(),
+            retry_queue: RetryQueue::new(cfg.retry.clone()),
+            checkpoints: CheckpointTracker::default(),
+            buffer: Vec::new(),
+            last_flush: Instant::now(),
+            paused: false,
+            dropped_entries: 0,
+            source,
+            cfg,
+        };
+
+        // Destination down: reading stops once the queue is full, nothing dropped
+        for _ in 0..10 {
+            runner.tick().await;
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        assert_eq!(runner.retry_queue.len(), 3);
+        assert_eq!(runner.dropped_entries, 0);
+
+        // Destination recovers: backlog delivered first, in order, then reading resumes
+        up.store(true, Ordering::SeqCst);
+        for _ in 0..2 {
+            runner.tick().await;
+        }
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec!["line0", "line1", "line2", "line3", "line4"]
+        );
     }
 }
