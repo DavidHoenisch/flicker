@@ -164,6 +164,9 @@ log_files:
         password: "your_secret_password"
       # Optional: Enable gzip compression (default: false)
       compression: true
+      # Optional: network timeouts for http/elasticsearch/syslog tcp/s3
+      # timeout_ms: 30000         # Whole-request timeout (default: 30000)
+      # connect_timeout_ms: 10000 # Connect timeout (default: 10000)
       # Optional: mTLS (mutual TLS) configuration
       # tls:
       #   cert_path: "/etc/flicker/certs/client.crt"
@@ -425,6 +428,8 @@ Array of API source configurations for pulling audit logs from REST APIs. Each e
 - **`results_field`** (string, required): JSON path to array of log entries (e.g., "data", "logs", "events")
 - **`timestamp_field`** (string, required): Field in each log entry containing the timestamp
 - **`message_field`** (string, optional): Field containing the log message (if not set, entire entry is serialized as JSON)
+- **`id_field`** (string, optional): Field uniquely identifying an entry; used to de-duplicate entries that share the last-seen timestamp (default: hash of the whole entry)
+- **`on_missing_timestamp`** (string, optional): `"drop"` or `"ship"` entries whose timestamp is missing or unparseable (default: `"drop"`, logged as a warning). Timestamps may be RFC 3339 strings or unix seconds/milliseconds/microseconds, as integers, floats or numeric strings
 
 **Time Filtering:**
 - **`time_filter_param`** (string, optional): Query parameter for filtering by time (e.g., "since", "start_time")

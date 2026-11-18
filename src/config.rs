@@ -146,6 +146,9 @@ pub struct ApiSourceConfig {
     pub results_field: String, // JSON path to array of log entries (e.g., "data", "logs", "events")
     pub timestamp_field: String, // Field in each log entry containing timestamp
     pub message_field: Option<String>, // Field containing the log message (if None, serialize entire object)
+    pub id_field: Option<String>, // Unique entry id, used to de-duplicate entries sharing a timestamp (default: hash of whole entry)
+    #[serde(default)]
+    pub on_missing_timestamp: MissingTimestampAction, // What to do with entries lacking a parseable timestamp
 
     // Pagination
     pub pagination: Option<PaginationConfig>,
@@ -155,6 +158,17 @@ pub struct ApiSourceConfig {
     pub time_filter_param: Option<String>, // Query param for filtering by time (e.g., "since", "start_time")
     #[serde(default)]
     pub time_filter_format: Option<String>, // Time format: "unix", "unix_ms", "rfc3339" (default: "rfc3339")
+}
+
+/// Handling for API entries whose timestamp is missing or unparseable
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MissingTimestampAction {
+    /// Skip the entry (logged as a warning)
+    #[default]
+    Drop,
+    /// Ship the entry anyway; it may be re-shipped on later polls
+    Ship,
 }
 
 #[derive(Debug, Deserialize, Clone)]

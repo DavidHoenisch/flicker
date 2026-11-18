@@ -1,10 +1,12 @@
-use crate::config::ApiSourceConfig;
+use crate::config::{ApiSourceConfig, MissingTimestampAction};
 use crate::registry::RegistryUpdate;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use reqwest::{Client, RequestBuilder};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 /// Maximum pages fetched in one poll, for every pagination mode
 const MAX_PAGES_PER_POLL: u32 = 100;
@@ -13,6 +15,8 @@ const MAX_PAGES_PER_POLL: u32 = 100;
 struct ApiSourceState {
     last_timestamp: Option<DateTime<Utc>>,
     cursor: Option<String>, // For cursor-based pagination
+    /// Keys of entries already shipped at exactly `last_timestamp`
+    boundary: HashSet<u64>,
     /// Where to continue if the last poll stopped at MAX_PAGES_PER_POLL
     resume: Option<PaginationResume>,
 }
@@ -23,6 +27,7 @@ struct PaginationResume {
     current_page: u32,
     cursor: Option<String>,
     max_timestamp: Option<DateTime<Utc>>,
+    max_boundary: HashSet<u64>,
 }
 
 /// Manages tailing multiple API sources
@@ -95,6 +100,7 @@ impl ApiTailer {
                 ApiSourceState {
                     last_timestamp: initial_timestamp,
                     cursor: initial_cursor,
+                    boundary: HashSet::new(),
                     resume: None,
                 },
             );
@@ -102,11 +108,12 @@ impl ApiTailer {
         }
 
         // Extract current state (to avoid holding mutable borrow)
-        let (initial_timestamp, initial_cursor, resume) = {
+        let (initial_timestamp, initial_cursor, initial_boundary, resume) = {
             let state = self.sources.get_mut(&config.name).unwrap();
             (
                 state.last_timestamp,
                 state.cursor.clone(),
+                state.boundary.clone(),
                 state.resume.take(),
             )
         };
@@ -131,12 +138,15 @@ impl ApiTailer {
         let mut page_offset = 0;
         let mut current_page = 1;
         let mut latest_timestamp = initial_timestamp;
+        let mut latest_boundary = initial_boundary.clone();
         if let Some(resume) = resume {
             current_cursor = resume.cursor;
             page_offset = resume.page_offset;
             current_page = resume.current_page;
             latest_timestamp = resume.max_timestamp;
+            latest_boundary = resume.max_boundary;
         }
+        let mut missing_timestamps = 0usize;
         let mut latest_cursor = current_cursor.clone();
         let mut pages_fetched = 0;
         let mut capped = false;
@@ -198,35 +208,42 @@ impl ApiTailer {
 
             // Process each entry
             for entry in entries {
-                // Extract timestamp
-                if let Some(timestamp) = self.extract_timestamp(&entry, config) {
-                    // Only process entries after the timestamp this poll started from.
-                    // DESIGN CHOICE: Compare against the starting point, not the running
-                    // max, so newest-first APIs don't drop the rest of the page.
-                    if let Some(last_ts) = initial_timestamp
-                        && timestamp <= last_ts
-                    {
-                        continue; // Skip this entry, we've already seen it
+                let timestamp = entry
+                    .pointer(&json_pointer(&config.timestamp_field))
+                    .and_then(parse_timestamp);
+
+                let Some(timestamp) = timestamp else {
+                    missing_timestamps += 1;
+                    if config.on_missing_timestamp == MissingTimestampAction::Ship {
+                        all_lines.push(self.entry_line(&entry, config));
                     }
+                    continue;
+                };
 
-                    // Extract log message
-                    let log_line = if let Some(message_field) = &config.message_field {
-                        self.extract_field_as_string(&entry, message_field)
-                            .unwrap_or_else(|| entry.to_string())
-                    } else {
-                        // Serialize entire entry
-                        serde_json::to_string(&entry).unwrap_or_else(|_| entry.to_string())
-                    };
+                // Only process entries after the timestamp this poll started from.
+                // DESIGN CHOICE: Compare against the starting point, not the running
+                // max, so newest-first APIs don't drop the rest of the page. Entries at
+                // exactly that timestamp are kept unless already shipped, since APIs
+                // with coarse timestamps can split same-timestamp entries across polls.
+                let key = entry_key(&entry, config);
+                if let Some(since) = initial_timestamp
+                    && (timestamp < since
+                        || (timestamp == since && initial_boundary.contains(&key)))
+                {
+                    continue; // Already seen
+                }
 
-                    all_lines.push(log_line);
+                all_lines.push(self.entry_line(&entry, config));
 
-                    // Update latest timestamp
-                    if latest_timestamp.is_none() || timestamp > latest_timestamp.unwrap() {
+                match latest_timestamp {
+                    Some(latest) if timestamp < latest => {}
+                    Some(latest) if timestamp == latest => {
+                        latest_boundary.insert(key);
+                    }
+                    _ => {
                         latest_timestamp = Some(timestamp);
+                        latest_boundary = HashSet::from([key]);
                     }
-                } else {
-                    // Timestamp extraction failed - entry will be skipped
-                    // Warning is already logged in extract_timestamp()
                 }
             }
 
@@ -237,7 +254,7 @@ impl ApiTailer {
                     "offset" => {
                         // If we got a full page, there might be more
                         if let Some(results_array) =
-                            body.pointer(&format!("/{}", config.results_field))
+                            body.pointer(&json_pointer(&config.results_field))
                             && let Some(array) = results_array.as_array()
                             && array.len() == pagination.page_size as usize
                         {
@@ -265,7 +282,7 @@ impl ApiTailer {
                     "page" => {
                         if let Some(has_more_field) = &pagination.has_more_field
                             && let Some(has_more_value) =
-                                body.pointer(&format!("/{}", has_more_field))
+                                body.pointer(&json_pointer(has_more_field))
                         {
                             has_more = has_more_value.as_bool().unwrap_or(false);
                             if has_more {
@@ -310,11 +327,26 @@ impl ApiTailer {
                     current_page,
                     cursor: current_cursor,
                     max_timestamp: latest_timestamp,
+                    max_boundary: latest_boundary,
                 });
             } else {
                 state.last_timestamp = latest_timestamp;
                 state.cursor = latest_cursor;
+                state.boundary = latest_boundary;
             }
+        }
+
+        if missing_timestamps > 0 {
+            eprintln!(
+                "Warning: API source {}: {} entries had a missing or unparseable '{}' field ({})",
+                config.name,
+                missing_timestamps,
+                config.timestamp_field,
+                match config.on_missing_timestamp {
+                    MissingTimestampAction::Drop => "dropped",
+                    MissingTimestampAction::Ship => "shipped",
+                }
+            );
         }
         Ok(all_lines)
     }
@@ -348,14 +380,14 @@ impl ApiTailer {
 
     /// Extract log entries from JSON response
     fn extract_entries(&self, body: &Value, config: &ApiSourceConfig) -> Result<Vec<Value>> {
-        let results_pointer = format!("/{}", config.results_field.replace('.', "/"));
-
-        let entries = body.pointer(&results_pointer).ok_or_else(|| {
-            anyhow!(
-                "Results field '{}' not found in response",
-                config.results_field
-            )
-        })?;
+        let entries = body
+            .pointer(&json_pointer(&config.results_field))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Results field '{}' not found in response",
+                    config.results_field
+                )
+            })?;
 
         let entries_array = entries
             .as_array()
@@ -364,63 +396,19 @@ impl ApiTailer {
         Ok(entries_array.clone())
     }
 
-    /// Extract timestamp from a log entry
-    fn extract_timestamp(&self, entry: &Value, config: &ApiSourceConfig) -> Option<DateTime<Utc>> {
-        let timestamp_pointer = format!("/{}", config.timestamp_field.replace('.', "/"));
-        let timestamp_value = entry.pointer(&timestamp_pointer)?;
-
-        // Try to parse as different timestamp formats
-        if let Some(ts_str) = timestamp_value.as_str() {
-            // Try RFC3339
-            if let Ok(dt) = DateTime::parse_from_rfc3339(ts_str) {
-                return Some(dt.with_timezone(&Utc));
-            }
-            // Try unix timestamp as string
-            if let Ok(unix_ts) = ts_str.parse::<i64>() {
-                return DateTime::from_timestamp(unix_ts, 0);
-            }
+    /// Log line for an entry: the message field, or the whole entry as JSON
+    fn entry_line(&self, entry: &Value, config: &ApiSourceConfig) -> String {
+        if let Some(message_field) = &config.message_field {
+            self.extract_field_as_string(entry, message_field)
+                .unwrap_or_else(|| entry.to_string())
+        } else {
+            serde_json::to_string(entry).unwrap_or_else(|_| entry.to_string())
         }
-
-        // Try unix timestamp as number (i64)
-        if let Some(ts_num) = timestamp_value.as_i64() {
-            // Heuristic: determine if it's seconds, milliseconds, or microseconds
-            // based on the magnitude of the number
-
-            // Microseconds: > 1_000_000_000_000 (roughly > year 2001 in milliseconds)
-            // Example: 1766098059650950 (microseconds since epoch)
-            if ts_num > 1_000_000_000_000 {
-                // Try as microseconds first
-                let secs = ts_num / 1_000_000;
-                let nanos = ((ts_num % 1_000_000) * 1_000) as u32;
-                if let Some(dt) = DateTime::from_timestamp(secs, nanos) {
-                    return Some(dt);
-                }
-            }
-
-            // Milliseconds: > 1_000_000_000 (roughly > year 2001 in seconds)
-            // Example: 1766098059650 (milliseconds since epoch)
-            if ts_num > 1_000_000_000
-                && let Some(dt) = DateTime::from_timestamp_millis(ts_num)
-            {
-                return Some(dt);
-            }
-
-            // Seconds: assume anything else is seconds
-            // Example: 1766098059 (seconds since epoch)
-            return DateTime::from_timestamp(ts_num, 0);
-        }
-
-        eprintln!(
-            "Warning: Failed to parse timestamp field '{}' in API source '{}'. Value: {:?}",
-            config.timestamp_field, config.name, timestamp_value
-        );
-        None
     }
 
     /// Extract a field value as a string
     fn extract_field_as_string(&self, value: &Value, field: &str) -> Option<String> {
-        let pointer = format!("/{}", field.replace('.', "/"));
-        let field_value = value.pointer(&pointer)?;
+        let field_value = value.pointer(&json_pointer(field))?;
 
         if let Some(s) = field_value.as_str() {
             Some(s.to_string())
@@ -430,10 +418,85 @@ impl ApiTailer {
     }
 }
 
+/// Convert a dotted field path ("a.b.c") to a JSON pointer ("/a/b/c")
+fn json_pointer(field: &str) -> String {
+    format!("/{}", field.replace('.', "/"))
+}
+
+/// Identity of an entry for de-duplication: its id field, or a hash of the whole entry
+fn entry_key(entry: &Value, config: &ApiSourceConfig) -> u64 {
+    let mut h = DefaultHasher::new();
+    match config
+        .id_field
+        .as_ref()
+        .and_then(|f| entry.pointer(&json_pointer(f)))
+    {
+        Some(id) => id.to_string().hash(&mut h),
+        None => entry.to_string().hash(&mut h),
+    }
+    h.finish()
+}
+
+/// Parse an RFC 3339 string or a unix timestamp (number or numeric string)
+fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
+    if let Some(s) = value.as_str() {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+            return Some(dt.with_timezone(&Utc));
+        }
+        if let Ok(n) = s.parse::<i64>() {
+            return from_unix_int(n);
+        }
+        return s.parse::<f64>().ok().and_then(from_unix_float);
+    }
+    if let Some(n) = value.as_i64() {
+        return from_unix_int(n);
+    }
+    value.as_f64().and_then(from_unix_float)
+}
+
+// Magnitude thresholds for guessing unix timestamp units. Current times are
+// ~1.7e9 s, ~1.7e12 ms, ~1.7e15 us; each threshold sits between two units.
+const UNIX_MILLIS_MIN: f64 = 1e11;
+const UNIX_MICROS_MIN: f64 = 1e14;
+
+/// Integer unix timestamp in seconds, milliseconds or microseconds (guessed by magnitude)
+fn from_unix_int(n: i64) -> Option<DateTime<Utc>> {
+    let magnitude = n.unsigned_abs() as f64;
+    if magnitude >= UNIX_MICROS_MIN {
+        DateTime::from_timestamp_micros(n)
+    } else if magnitude >= UNIX_MILLIS_MIN {
+        DateTime::from_timestamp_millis(n)
+    } else {
+        DateTime::from_timestamp(n, 0)
+    }
+}
+
+/// Fractional unix timestamp (e.g. 1731801600.123), units guessed by magnitude
+fn from_unix_float(f: f64) -> Option<DateTime<Utc>> {
+    if !f.is_finite() {
+        return None;
+    }
+    let nanos_per_unit: i64 = if f.abs() >= UNIX_MICROS_MIN {
+        1_000
+    } else if f.abs() >= UNIX_MILLIS_MIN {
+        1_000_000
+    } else {
+        1_000_000_000
+    };
+    // Split whole and fractional parts so f64 rounding doesn't eat sub-second precision
+    let whole = f.trunc();
+    if whole.abs() >= (i64::MAX / nanos_per_unit) as f64 {
+        return None;
+    }
+    let frac_nanos = ((f - whole) * nanos_per_unit as f64).round() as i64;
+    Some(DateTime::from_timestamp_nanos(
+        whole as i64 * nanos_per_unit + frac_nanos,
+    ))
+}
+
 /// Read the next-page cursor; null, empty or missing means there are no more pages
 fn next_cursor_value(body: &Value, field: &str) -> Option<String> {
-    let pointer = format!("/{}", field.replace('.', "/"));
-    match body.pointer(&pointer)? {
+    match body.pointer(&json_pointer(field))? {
         Value::Null => None,
         Value::String(s) if s.is_empty() => None,
         Value::String(s) => Some(s.clone()),
@@ -611,5 +674,105 @@ pagination:
             queries[MAX_PAGES_PER_POLL as usize]
                 .contains(&format!("page={}", MAX_PAGES_PER_POLL + 1))
         );
+    }
+
+    #[test]
+    fn test_parse_timestamp_units() {
+        let expected: DateTime<Utc> = "2024-11-17T00:00:00Z".parse().unwrap();
+        let secs = expected.timestamp();
+        assert_eq!(parse_timestamp(&serde_json::json!(secs)), Some(expected));
+        assert_eq!(
+            parse_timestamp(&serde_json::json!(secs * 1000)),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_timestamp(&serde_json::json!(secs * 1_000_000)),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_timestamp(&serde_json::json!(secs.to_string())),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_timestamp(&serde_json::json!("2024-11-17T00:00:00Z")),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_float() {
+        let ts = parse_timestamp(&serde_json::json!(1731801600.5)).unwrap();
+        assert_eq!(ts.timestamp(), 1731801600);
+        assert_eq!(ts.timestamp_subsec_millis(), 500);
+        let ts = parse_timestamp(&serde_json::json!("1731801600.25")).unwrap();
+        assert_eq!(ts.timestamp_subsec_millis(), 250);
+        assert!(parse_timestamp(&serde_json::json!("not a time")).is_none());
+        assert!(parse_timestamp(&serde_json::json!(null)).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_entries_sharing_last_timestamp_across_polls() {
+        // First response has "a"; second has "a" again plus "b" at the same timestamp
+        let calls = Arc::new(Mutex::new(0));
+        let counter = calls.clone();
+        let (url, _) = mock_api(move |_| {
+            let mut n = counter.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                r#"{"data":[{"ts":"2030-01-01T00:00:00Z","msg":"a"}],"next":null}"#.to_string()
+            } else {
+                r#"{"data":[{"ts":"2030-01-01T00:00:00Z","msg":"a"},{"ts":"2030-01-01T00:00:00Z","msg":"b"}],"next":null}"#
+                    .to_string()
+            }
+        })
+        .await;
+        let config = api_config(&url, CURSOR_PAGINATION);
+        let mut tailer = primed_tailer(&config).await;
+
+        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["a"]);
+        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["b"]);
+        assert!(tailer.poll(&config).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_missing_timestamp_ship_option() {
+        let (url, _) = mock_api(|_| {
+            r#"{"data":[{"msg":"no-ts"},{"ts":"2030-01-01T00:00:00Z","msg":"ok"}],"next":null}"#
+                .to_string()
+        })
+        .await;
+        let mut config = api_config(&url, CURSOR_PAGINATION);
+        let mut tailer = primed_tailer(&config).await;
+        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["ok"]);
+
+        config.on_missing_timestamp = MissingTimestampAction::Ship;
+        let lines = tailer.poll(&config).await.unwrap();
+        assert_eq!(lines, vec!["no-ts"]);
+    }
+
+    #[tokio::test]
+    async fn test_offset_pagination_with_nested_results_field() {
+        let (url, queries) = mock_api(|query| {
+            if query.contains("offset=0") {
+                r#"{"res":{"data":[{"ts":"2030-01-01T00:00:00Z","msg":"a"}]}}"#.to_string()
+            } else {
+                r#"{"res":{"data":[]}}"#.to_string()
+            }
+        })
+        .await;
+        let mut config = api_config(
+            &url,
+            r#"
+  pagination_type: offset
+  limit_param: limit
+  offset_param: offset
+  page_size: 1"#,
+        );
+        config.results_field = "res.data".to_string();
+        let mut tailer = primed_tailer(&config).await;
+
+        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["a"]);
+        // Full first page -> fetched a second page
+        assert_eq!(queries.lock().unwrap().len(), 2);
     }
 }
