@@ -2,6 +2,28 @@
 
 This directory contains testing tools for Flicker log shipping.
 
+## Integration Gauntlet (automated)
+
+`gauntlet.sh` runs the release binary against real receivers and **asserts** on what
+arrives (every numbered line exactly once, no PII leaks, no loss across crash/restart,
+rotation and truncation, etc.). It exits non-zero on any failure and runs in CI.
+
+```bash
+cargo build --release
+test_tools/gauntlet.sh              # all scenarios; Docker ones skipped if Docker is down
+test_tools/gauntlet.sh --list       # list scenarios
+test_tools/gauntlet.sh api mtls     # run a subset
+REQUIRE_DOCKER=1 test_tools/gauntlet.sh   # treat missing Docker as failure
+KEEP_WORK=1 test_tools/gauntlet.sh        # keep per-scenario logs
+```
+
+Needs `python3`, `curl` and `openssl`; the `docker` and `s3` scenarios need Docker
+(S3 uses `adobe/s3mock`). The scripts below are interactive demos.
+
+The helper scripts support test automation: `test-receiver.py --port --output FILE
+--fail-first N --quiet`, `test-mtls-receiver.py --output FILE`, and
+`test-api-server.py --no-generator --no-initial`.
+
 ## Quick Start with Docker Compose
 
 For S3 registry testing, we provide a `docker-compose.yml` that runs MinIO (S3-compatible storage) locally:

@@ -28,6 +28,10 @@ RESET = '\033[0m'
 BOLD = '\033[1m'
 
 
+# Append every received entry here as JSONL (for test assertions); set in main()
+OUTPUT_PATH = None
+
+
 class MTLSLogReceiver(BaseHTTPRequestHandler):
     """HTTP request handler that processes log batches with mTLS authentication"""
 
@@ -51,8 +55,9 @@ class MTLSLogReceiver(BaseHTTPRequestHandler):
         content_encoding = self.headers.get('Content-Encoding', '').lower()
         is_compressed = content_encoding == 'gzip'
 
-        # Read request body
-        body = self.request.recv(content_length)
+        # Read request body (rfile loops until the full body arrives; a single
+        # recv() on a TLS socket can return a partial body)
+        body = self.rfile.read(content_length)
 
         # Decompress if needed
         if is_compressed:
@@ -76,6 +81,11 @@ class MTLSLogReceiver(BaseHTTPRequestHandler):
             self.send_response(400)
             self.end_headers()
             return
+
+        if OUTPUT_PATH:
+            with open(OUTPUT_PATH, 'a') as out:
+                for entry in entries:
+                    out.write(json.dumps(entry) + "\n")
 
         # Print batch info with mTLS client info
         timestamp = datetime.now().strftime('%H:%M:%S')
@@ -160,8 +170,11 @@ def main():
     parser = argparse.ArgumentParser(description='HTTPS receiver with mTLS for Flicker testing')
     parser.add_argument('--port', type=int, default=8443, help='Port to listen on (default: 8443)')
     parser.add_argument('--host', type=str, default='localhost', help='Host to bind to (default: localhost)')
+    parser.add_argument('--output', help='Append received entries to this file as JSONL')
 
     args = parser.parse_args()
+    global OUTPUT_PATH
+    OUTPUT_PATH = args.output
 
     print(f"{BOLD}{GREEN}Flicker mTLS Test Receiver{RESET}")
     print(f"{CYAN}{'=' * 50}{RESET}")
