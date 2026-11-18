@@ -181,6 +181,15 @@ impl CheckpointTracker {
         seq
     }
 
+    /// Seal a batch holding only part of the buffer. It carries no checkpoint:
+    /// the position covering the rest of the buffer goes on the final part.
+    pub fn seal_partial(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.inflight.push_back((seq, None, false));
+        seq
+    }
+
     /// Mark a batch as delivered or permanently dropped
     pub fn resolve(&mut self, seq: u64) {
         if let Some(entry) = self.inflight.iter_mut().find(|(s, _, _)| *s == seq) {
@@ -245,7 +254,10 @@ impl<S: Source> Runner<S> {
                     self.checkpoints.resolve(seq);
                 }
                 Err(e) => {
-                    eprintln!("[Retry] Failed to resend batch from {}: {}", self.label, e);
+                    eprintln!(
+                        "[Retry] Failed to resend batch from {}: {:#}",
+                        self.label, e
+                    );
                     if let Some(dropped) = self.retry_queue.fail() {
                         self.drop_batch(dropped);
                     }
@@ -317,7 +329,7 @@ impl<S: Source> Runner<S> {
                 }
             }
             Err(e) => {
-                eprintln!("Error polling {}: {}", self.label, e);
+                eprintln!("Error polling {}: {:#}", self.label, e);
             }
         }
     }
@@ -333,21 +345,33 @@ impl<S: Source> Runner<S> {
             reason
         );
 
-        let seq = self.checkpoints.seal();
-        let batch = std::mem::take(&mut self.buffer);
         self.last_flush = Instant::now();
 
-        // Keep delivery in order: wait behind batches that are still being retried
-        if !self.retry_queue.is_empty() {
-            self.retry_queue.enqueue(seq, batch);
-            return;
-        }
+        // DESIGN CHOICE: buffer_size caps batch size, not just the flush trigger. A
+        // single poll can read far more than buffer_size lines; sending them as one
+        // request could exceed destination limits.
+        let mut rest = std::mem::take(&mut self.buffer);
+        while !rest.is_empty() {
+            let tail = rest.split_off(rest.len().min(self.cfg.buffer_size.max(1)));
+            let batch = std::mem::replace(&mut rest, tail);
+            let seq = if rest.is_empty() {
+                self.checkpoints.seal()
+            } else {
+                self.checkpoints.seal_partial()
+            };
 
-        if let Err(e) = self.cfg.destination.send_batch(batch.clone()).await {
-            eprintln!("Failed to ship batch from {}: {}", self.label, e);
-            self.retry_queue.add_failed_batch(seq, batch);
-        } else {
-            self.checkpoints.resolve(seq);
+            // Keep delivery in order: wait behind batches that are still being retried
+            if !self.retry_queue.is_empty() {
+                self.retry_queue.enqueue(seq, batch);
+                continue;
+            }
+
+            if let Err(e) = self.cfg.destination.send_batch(batch.clone()).await {
+                eprintln!("Failed to ship batch from {}: {:#}", self.label, e);
+                self.retry_queue.add_failed_batch(seq, batch);
+            } else {
+                self.checkpoints.resolve(seq);
+            }
         }
     }
 
@@ -620,5 +644,83 @@ mod tests {
             *received.lock().unwrap(),
             vec!["line0", "line1", "line2", "line3", "line4"]
         );
+    }
+
+    #[test]
+    fn test_partial_batches_carry_no_checkpoint() {
+        let mut t = CheckpointTracker::default();
+        t.observe(cp(100));
+        let first = t.seal_partial();
+        let last = t.seal();
+
+        // First part delivered, last part still pending: position must not advance
+        t.resolve(first);
+        assert_eq!(position(t.take_committable(true)), None);
+
+        t.resolve(last);
+        assert_eq!(position(t.take_committable(true)), Some(100));
+    }
+
+    #[tokio::test]
+    async fn test_flush_splits_into_buffer_sized_batches() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let batches = Arc::new(Mutex::new(Vec::new()));
+
+        struct SizeRecorder {
+            received: Arc<Mutex<Vec<String>>>,
+            batches: Arc<Mutex<Vec<usize>>>,
+        }
+        #[async_trait]
+        impl Destination for SizeRecorder {
+            async fn send(&self, entry: LogEntry) -> anyhow::Result<()> {
+                self.send_batch(vec![entry]).await
+            }
+            async fn send_batch(&self, entries: Vec<LogEntry>) -> anyhow::Result<()> {
+                self.batches.lock().unwrap().push(entries.len());
+                self.received
+                    .lock()
+                    .unwrap()
+                    .extend(entries.into_iter().map(|e| e.line));
+                Ok(())
+            }
+        }
+
+        let cfg = PipelineConfig {
+            polling_frequency: Duration::from_millis(1),
+            buffer_size: 4,
+            flush_interval: Duration::from_secs(60),
+            filter: LogFilter::new(vec![], vec![]).unwrap(),
+            masking: None,
+            destination: Box::new(SizeRecorder {
+                received: received.clone(),
+                batches: batches.clone(),
+            }),
+            retry: RetryConfig::default(),
+            registry_tx: None,
+        };
+        let source = CountingSource {
+            polls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut runner = Runner {
+            label: source.label(),
+            entry_path: source.entry_path(),
+            retry_queue: RetryQueue::new(cfg.retry.clone()),
+            checkpoints: CheckpointTracker::default(),
+            buffer: (0..10)
+                .map(|i| LogEntry::new("t", format!("l{}", i)))
+                .collect(),
+            last_flush: Instant::now(),
+            paused: false,
+            dropped_entries: 0,
+            id_prefix: "test".to_string(),
+            next_entry_id: 0,
+            source,
+            cfg,
+        };
+        runner.flush("test").await;
+
+        assert_eq!(*batches.lock().unwrap(), vec![4, 4, 2]);
+        assert_eq!(received.lock().unwrap().len(), 10);
+        assert!(runner.buffer.is_empty());
     }
 }
