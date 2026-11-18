@@ -169,20 +169,11 @@ pub enum RegistryUpdate {
 /// This task runs independently and batches writes to avoid excessive I/O
 pub async fn registry_writer_task(
     storage: std::sync::Arc<dyn crate::registry_storage::RegistryStorage>,
+    mut registry: Registry,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<RegistryUpdate>,
 ) {
     use tokio::time::{Duration, interval};
 
-    let mut registry = match storage.load().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "Failed to load registry: {}. Starting with empty registry.",
-                e
-            );
-            Registry::new()
-        }
-    };
     let mut dirty = false;
 
     // Flush registry to storage every 5 seconds, and once more when the channel closes

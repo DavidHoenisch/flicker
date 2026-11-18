@@ -17,7 +17,7 @@ use crate::docker_tailer::DockerTailer;
 use crate::filter::LogFilter;
 use crate::masking::{MaskingConfig, MaskingEngine};
 use crate::pipeline::{ApiSource, DockerSource, FileSource, PipelineConfig, run_source};
-use crate::registry::{Registry, RegistryUpdate, registry_writer_task};
+use crate::registry::{RegistryUpdate, registry_writer_task};
 use crate::registry_storage::{FileSystemStorage, RegistryStorage, S3Storage};
 use crate::retry_queue::RetryConfig;
 use crate::tailer::LogTailer;
@@ -72,27 +72,20 @@ async fn main() -> anyhow::Result<()> {
                 "Registry tracking enabled, using file: {}",
                 args.registry_file
             );
-            Arc::new(FileSystemStorage::new(&args.registry_file))
+            Arc::new(FileSystemStorage::new(&args.registry_file)?)
         };
 
-        // Load initial registry from storage
-        let registry = match storage.load().await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "Failed to load registry: {}. Starting with empty registry.",
-                    e
-                );
-                Registry::new()
-            }
-        };
+        // DESIGN CHOICE: A registry that exists but can't be read stops startup.
+        // Starting empty would silently skip everything since the last good save.
+        let registry = storage.load().await?;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
         // Spawn registry writer task
         let storage_clone = storage.clone();
+        let initial = registry.clone();
         registry_writer = Some(tokio::spawn(async move {
-            registry_writer_task(storage_clone, rx).await;
+            registry_writer_task(storage_clone, initial, rx).await;
         }));
 
         Some((tx, registry))
