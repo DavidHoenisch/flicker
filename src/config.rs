@@ -256,6 +256,7 @@ pub struct DestinationConfig {
     pub host: Option<String>,     // Syslog server hostname
     pub port: Option<u16>,        // Syslog server port (default: 514)
     pub protocol: Option<String>, // "udp" or "tcp" (default: "udp")
+    pub framing: Option<String>,  // TCP framing: "newline" (default) or "octet-counting"
 
     // Elasticsearch destination fields
     pub url: Option<String>,   // Elasticsearch URL

@@ -155,6 +155,7 @@ pub fn create_destination(
                 host,
                 port,
                 protocol,
+                config.framing.as_deref(),
                 config.request_timeout(),
                 config.connect_timeout(),
             )?))
@@ -211,6 +212,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -238,6 +240,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -267,6 +270,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -294,6 +298,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -321,6 +326,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -348,6 +354,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -375,6 +382,7 @@ mod tests {
             region: Some("us-west-2".to_string()),
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -402,6 +410,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -431,6 +440,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -458,6 +468,7 @@ mod tests {
             region: Some("us-east-1".to_string()),
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);
@@ -485,6 +496,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = create_destination(&config);

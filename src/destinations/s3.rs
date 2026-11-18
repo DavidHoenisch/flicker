@@ -182,6 +182,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = S3Destination::new(&config);
@@ -213,6 +214,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = S3Destination::new(&config);
@@ -244,6 +246,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = S3Destination::new(&config);
@@ -273,6 +276,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = S3Destination::new(&config);
@@ -302,6 +306,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = S3Destination::new(&config);
@@ -331,6 +336,7 @@ mod tests {
             region: Some("us-west-2".to_string()),
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = S3Destination::new(&config);
@@ -360,6 +366,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let result = S3Destination::new(&config);
@@ -389,6 +396,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();
@@ -422,6 +430,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();
@@ -455,6 +464,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();
@@ -487,6 +497,7 @@ mod tests {
             region: None,
             timeout_ms: None,
             connect_timeout_ms: None,
+            framing: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();

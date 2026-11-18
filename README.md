@@ -224,6 +224,7 @@ log_files:
       type: "syslog"
       host: "syslog-server.local"
       protocol: "udp"
+      # framing: "newline"  # TCP only: "newline" (embedded newlines escaped) or "octet-counting"
 
   # Application logs with PII masking
   - path: "/var/log/myapp/user-activity.log"
