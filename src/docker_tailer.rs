@@ -1,3 +1,4 @@
+use crate::pipeline::SourceLine;
 use crate::registry::RegistryUpdate;
 use bollard::Docker;
 use bollard::container::LogsOptions;
@@ -78,7 +79,7 @@ impl DockerTailer {
     ///
     /// # Arguments
     /// * `container` - Container name or ID
-    pub async fn poll(&mut self, container: &str) -> anyhow::Result<Vec<String>> {
+    pub async fn poll(&mut self, container: &str) -> anyhow::Result<Vec<SourceLine>> {
         use futures_util::StreamExt;
 
         let mut lines = Vec::new();
@@ -147,11 +148,11 @@ impl DockerTailer {
                     }) {
                         Some((timestamp, content)) => {
                             if state.admit(timestamp, content) {
-                                lines.push(content.to_string());
+                                lines.push(SourceLine::new(content, Some(timestamp)));
                             }
                         }
                         // No timestamp found, just use the whole line
-                        None => lines.push(log_str.to_string()),
+                        None => lines.push(SourceLine::new(log_str, None)),
                     }
                 }
                 Err(e) => {

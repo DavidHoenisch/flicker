@@ -182,10 +182,7 @@ mod tests {
     use super::*;
 
     fn create_test_entry(line: &str) -> LogEntry {
-        LogEntry {
-            path: "/test.log".to_string(),
-            line: line.to_string(),
-        }
+        LogEntry::new("/test.log", line)
     }
 
     fn test_config(max_retries: u32, max_queue_size: usize) -> RetryConfig {

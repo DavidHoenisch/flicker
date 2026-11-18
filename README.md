@@ -552,15 +552,16 @@ Destination configuration for log files, Docker containers, and API sources:
 
 - **`type`** (string, required): Destination type: "http", "syslog", "elasticsearch", "file", or "s3"
 - **`endpoint`** (string, required for http): The HTTP endpoint to send logs to
-- **`require_auth`** (boolean, optional for http): If true, requires either `api_key` or `basic` to be set
-- **`api_key`** (string, optional for http): A bearer token to include in the `Authorization` header
-- **`basic`** (object, optional for http): An object with `username` and `password` for basic authentication
+- **`require_auth`** (boolean, optional for http/elasticsearch): If true, requires either `api_key` or `basic` to be set
+- **`api_key`** (string, optional for http/elasticsearch): A bearer token to include in the `Authorization` header
+- **`basic`** (object, optional for http/elasticsearch): An object with `username` and `password` for basic authentication
 - **`compression`** (boolean, optional for http, default: false): Enable gzip compression for HTTP payloads
-- **`tls`** (object, optional for http): TLS/mTLS configuration for client certificate authentication
+- **`tls`** (object, optional for http/elasticsearch): TLS/mTLS configuration for client certificate authentication
   - **`cert_path`** (string, required): Path to client certificate file in PEM format
   - **`key_path`** (string, required): Path to client private key file in PEM format
   - **`ca_cert_path`** (string, optional): Path to custom CA certificate for server verification
   - **`accept_invalid_certs`** (boolean, optional, default: false): Accept invalid/self-signed server certificates (not recommended for production)
+- **`timeout_ms`** / **`connect_timeout_ms`** (integer, optional for http/elasticsearch/syslog tcp/s3, defaults 30000/10000): Request and connect timeouts
 - **Other fields** (various): Destination-specific fields (see examples/flicker-example.yaml)
 - **`bucket`** (string, required for s3): S3 bucket name
 - **`prefix`** (string, optional for s3): S3 key prefix (e.g., "logs/myapp/")

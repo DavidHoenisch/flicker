@@ -1,4 +1,5 @@
 use crate::config::{ApiSourceConfig, MissingTimestampAction};
+use crate::pipeline::SourceLine;
 use crate::registry::RegistryUpdate;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -73,7 +74,7 @@ impl ApiTailer {
 
     /// Poll an API source for new log entries
     /// Returns a Vec of log lines (as strings)
-    pub async fn poll(&mut self, config: &ApiSourceConfig) -> Result<Vec<String>> {
+    pub async fn poll(&mut self, config: &ApiSourceConfig) -> Result<Vec<SourceLine>> {
         let mut all_lines = Vec::new();
 
         // Check if we're already tracking this source
@@ -215,7 +216,7 @@ impl ApiTailer {
                 let Some(timestamp) = timestamp else {
                     missing_timestamps += 1;
                     if config.on_missing_timestamp == MissingTimestampAction::Ship {
-                        all_lines.push(self.entry_line(&entry, config));
+                        all_lines.push(SourceLine::new(self.entry_line(&entry, config), None));
                     }
                     continue;
                 };
@@ -233,7 +234,10 @@ impl ApiTailer {
                     continue; // Already seen
                 }
 
-                all_lines.push(self.entry_line(&entry, config));
+                all_lines.push(SourceLine::new(
+                    self.entry_line(&entry, config),
+                    Some(timestamp),
+                ));
 
                 match latest_timestamp {
                     Some(latest) if timestamp < latest => {}
@@ -570,6 +574,10 @@ pagination:
         .unwrap()
     }
 
+    fn texts(lines: Vec<SourceLine>) -> Vec<String> {
+        lines.into_iter().map(|l| l.text).collect()
+    }
+
     /// Create a tailer that has already done its initial (empty) poll from 2020
     async fn primed_tailer(config: &ApiSourceConfig) -> ApiTailer {
         let mut tailer = ApiTailer::new().unwrap();
@@ -593,7 +601,7 @@ pagination:
         let config = api_config(&url, CURSOR_PAGINATION);
         let mut tailer = primed_tailer(&config).await;
 
-        let lines = tailer.poll(&config).await.unwrap();
+        let lines = texts(tailer.poll(&config).await.unwrap());
         assert_eq!(lines, vec!["a"]);
         assert_eq!(queries.lock().unwrap().len(), 1);
     }
@@ -607,7 +615,7 @@ pagination:
         let config = api_config(&url, CURSOR_PAGINATION);
         let mut tailer = primed_tailer(&config).await;
 
-        tailer.poll(&config).await.unwrap();
+        texts(tailer.poll(&config).await.unwrap());
         assert_eq!(queries.lock().unwrap().len(), 1);
     }
 
@@ -617,7 +625,7 @@ pagination:
         let config = api_config(&url, CURSOR_PAGINATION);
         let mut tailer = primed_tailer(&config).await;
 
-        tailer.poll(&config).await.unwrap();
+        texts(tailer.poll(&config).await.unwrap());
         // First page yields cursor "same", second page repeats it -> stop
         assert_eq!(queries.lock().unwrap().len(), 2);
     }
@@ -632,7 +640,7 @@ pagination:
         let config = api_config(&url, CURSOR_PAGINATION);
         let mut tailer = primed_tailer(&config).await;
 
-        let lines = tailer.poll(&config).await.unwrap();
+        let lines = texts(tailer.poll(&config).await.unwrap());
         assert_eq!(lines, vec!["new", "old"]);
     }
 
@@ -661,13 +669,13 @@ pagination:
         let mut tailer = primed_tailer(&config).await;
         let start_checkpoint = format!("{:?}", tailer.checkpoint("test"));
 
-        let lines = tailer.poll(&config).await.unwrap();
+        let lines = texts(tailer.poll(&config).await.unwrap());
         assert_eq!(lines.len(), MAX_PAGES_PER_POLL as usize);
         // Timestamp held until pagination completes
         assert_eq!(format!("{:?}", tailer.checkpoint("test")), start_checkpoint);
 
         // Next poll continues from the next page
-        let lines = tailer.poll(&config).await.unwrap();
+        let lines = texts(tailer.poll(&config).await.unwrap());
         assert_eq!(lines[0], format!("p{}", MAX_PAGES_PER_POLL + 1));
         let queries = queries.lock().unwrap();
         assert!(
@@ -729,9 +737,9 @@ pagination:
         let config = api_config(&url, CURSOR_PAGINATION);
         let mut tailer = primed_tailer(&config).await;
 
-        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["a"]);
-        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["b"]);
-        assert!(tailer.poll(&config).await.unwrap().is_empty());
+        assert_eq!(texts(tailer.poll(&config).await.unwrap()), vec!["a"]);
+        assert_eq!(texts(tailer.poll(&config).await.unwrap()), vec!["b"]);
+        assert!(texts(tailer.poll(&config).await.unwrap()).is_empty());
     }
 
     #[tokio::test]
@@ -743,10 +751,10 @@ pagination:
         .await;
         let mut config = api_config(&url, CURSOR_PAGINATION);
         let mut tailer = primed_tailer(&config).await;
-        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["ok"]);
+        assert_eq!(texts(tailer.poll(&config).await.unwrap()), vec!["ok"]);
 
         config.on_missing_timestamp = MissingTimestampAction::Ship;
-        let lines = tailer.poll(&config).await.unwrap();
+        let lines = texts(tailer.poll(&config).await.unwrap());
         assert_eq!(lines, vec!["no-ts"]);
     }
 
@@ -771,7 +779,7 @@ pagination:
         config.results_field = "res.data".to_string();
         let mut tailer = primed_tailer(&config).await;
 
-        assert_eq!(tailer.poll(&config).await.unwrap(), vec!["a"]);
+        assert_eq!(texts(tailer.poll(&config).await.unwrap()), vec!["a"]);
         // Full first page -> fetched a second page
         assert_eq!(queries.lock().unwrap().len(), 2);
     }

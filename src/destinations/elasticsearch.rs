@@ -10,12 +10,11 @@
 // {"index":{"_index":"logs"}}
 // {"@timestamp":"2025-12-03T14:23:46Z","path":"/var/log/app.log","message":"..."}
 
-use super::{Destination, LogEntry};
+use super::{Destination, LogEntry, build_http_client};
+use crate::config::DestinationConfig;
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::Utc;
 use serde::Serialize;
-use std::time::Duration;
 
 pub struct ElasticsearchDestination {
     client: reqwest::Client,
@@ -24,13 +23,17 @@ pub struct ElasticsearchDestination {
 }
 
 #[derive(Serialize)]
-struct BulkIndexAction {
-    index: BulkIndexTarget,
+struct BulkIndexAction<'a> {
+    index: BulkIndexTarget<'a>,
 }
 
 #[derive(Serialize)]
-struct BulkIndexTarget {
-    _index: String,
+struct BulkIndexTarget<'a> {
+    _index: &'a str,
+    // DESIGN CHOICE: A fixed _id per entry makes resending a batch idempotent.
+    // ES reports bulk failures per item but we retry whole batches; without an
+    // _id the items that had already succeeded would be indexed twice.
+    _id: &'a str,
 }
 
 #[derive(Serialize)]
@@ -44,16 +47,9 @@ struct ElasticsearchDocument {
 }
 
 impl ElasticsearchDestination {
-    pub fn new(
-        url: String,
-        index: String,
-        timeout: Duration,
-        connect_timeout: Duration,
-    ) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .connect_timeout(connect_timeout)
-            .build()?;
+    pub fn new(url: String, index: String, config: &DestinationConfig) -> Result<Self> {
+        // Same auth (api_key/basic), TLS and timeout handling as the HTTP destination
+        let client = build_http_client(config, "Elasticsearch")?;
         Ok(Self {
             client,
             url: url.trim_end_matches('/').to_string(),
@@ -65,30 +61,31 @@ impl ElasticsearchDestination {
     /// Each document requires two lines:
     /// 1. Action metadata ({"index":{"_index":"..."}})
     /// 2. Document data (the actual log entry)
-    fn build_bulk_body(&self, entries: &[LogEntry]) -> String {
+    fn build_bulk_body(&self, entries: &[LogEntry]) -> Result<String> {
         let mut body = String::new();
 
         for entry in entries {
             // Line 1: Index action
             let action = BulkIndexAction {
                 index: BulkIndexTarget {
-                    _index: self.index.clone(),
+                    _index: &self.index,
+                    _id: &entry.id,
                 },
             };
-            body.push_str(&serde_json::to_string(&action).unwrap());
+            body.push_str(&serde_json::to_string(&action)?);
             body.push('\n');
 
-            // Line 2: Document
+            // Line 2: Document (timestamped with when the line was logged, not shipped)
             let doc = ElasticsearchDocument {
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: entry.timestamp.to_rfc3339(),
                 path: entry.path.clone(),
                 message: entry.line.clone(),
             };
-            body.push_str(&serde_json::to_string(&doc).unwrap());
+            body.push_str(&serde_json::to_string(&doc)?);
             body.push('\n');
         }
 
-        body
+        Ok(body)
     }
 }
 
@@ -111,7 +108,7 @@ impl Destination for ElasticsearchDestination {
         );
 
         // Build NDJSON bulk request body
-        let body = self.build_bulk_body(&entries);
+        let body = self.build_bulk_body(&entries)?;
 
         // Send to Elasticsearch _bulk API
         let bulk_url = format!("{}/_bulk", self.url);
@@ -151,5 +148,80 @@ impl Destination for ElasticsearchDestination {
         println!("[ELASTICSEARCH] Batch indexed successfully");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    fn dest() -> ElasticsearchDestination {
+        let config: DestinationConfig =
+            serde_yaml::from_str("type: elasticsearch\nurl: http://localhost:9200\nindex: logs\n")
+                .unwrap();
+        ElasticsearchDestination::new("http://localhost:9200".into(), "logs".into(), &config)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_bulk_body_uses_entry_id_and_timestamp() {
+        let ts: DateTime<Utc> = "2024-01-02T03:04:05Z".parse().unwrap();
+        let entry = LogEntry {
+            path: "/var/log/app.log".into(),
+            line: "hello".into(),
+            timestamp: ts,
+            id: "abc-1".into(),
+        };
+        let body = dest().build_bulk_body(&[entry.clone(), entry]).unwrap();
+        let lines: Vec<serde_json::Value> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0]["index"]["_id"], "abc-1");
+        assert_eq!(lines[0]["index"]["_index"], "logs");
+        assert_eq!(lines[1]["@timestamp"], ts.to_rfc3339());
+        assert_eq!(lines[1]["message"], "hello");
+        // Resending the same entry produces the same _id (idempotent)
+        assert_eq!(lines[2]["index"]["_id"], "abc-1");
+    }
+
+    #[tokio::test]
+    async fn test_sends_configured_auth() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = sock.read(&mut buf).await.unwrap();
+            let body = r#"{"errors":false,"items":[]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let config: DestinationConfig = serde_yaml::from_str(&format!(
+            "type: elasticsearch\nurl: http://{}\nindex: logs\napi_key: secret123\n",
+            addr
+        ))
+        .unwrap();
+        let es = ElasticsearchDestination::new(format!("http://{}", addr), "logs".into(), &config)
+            .unwrap();
+        es.send_batch(vec![LogEntry::new("/a.log", "x")])
+            .await
+            .unwrap();
+
+        let request = server.await.unwrap().to_lowercase();
+        assert!(
+            request.contains("authorization: bearer secret123"),
+            "{}",
+            request
+        );
     }
 }

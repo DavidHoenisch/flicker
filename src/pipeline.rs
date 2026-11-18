@@ -13,11 +13,29 @@ use crate::registry::RegistryUpdate;
 use crate::retry_queue::{RetryBatch, RetryConfig, RetryQueue};
 use crate::tailer::LogTailer;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 use tokio::time;
+
+/// A line read from a source
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceLine {
+    pub text: String,
+    /// When the source says the line was logged, if it knows
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
+impl SourceLine {
+    pub fn new(text: impl Into<String>, timestamp: Option<DateTime<Utc>>) -> Self {
+        Self {
+            text: text.into(),
+            timestamp,
+        }
+    }
+}
 
 /// A pollable log source
 #[async_trait]
@@ -27,7 +45,7 @@ pub trait Source: Send {
     /// Value used for `LogEntry::path`
     fn entry_path(&self) -> String;
     /// Read new lines since the last poll
-    async fn poll(&mut self) -> anyhow::Result<Vec<String>>;
+    async fn poll(&mut self) -> anyhow::Result<Vec<SourceLine>>;
     /// Position covering everything returned by `poll` so far
     fn checkpoint(&self) -> Option<RegistryUpdate>;
 }
@@ -45,8 +63,14 @@ impl Source for FileSource {
     fn entry_path(&self) -> String {
         self.path.clone()
     }
-    async fn poll(&mut self) -> anyhow::Result<Vec<String>> {
-        self.tailer.poll(&self.path)
+    async fn poll(&mut self) -> anyhow::Result<Vec<SourceLine>> {
+        // Plain files carry no structured timestamp; the read time is used
+        Ok(self
+            .tailer
+            .poll(&self.path)?
+            .into_iter()
+            .map(|line| SourceLine::new(line, None))
+            .collect())
     }
     fn checkpoint(&self) -> Option<RegistryUpdate> {
         self.tailer.checkpoint(&self.path)
@@ -66,7 +90,7 @@ impl Source for DockerSource {
     fn entry_path(&self) -> String {
         format!("docker://{}", self.container)
     }
-    async fn poll(&mut self) -> anyhow::Result<Vec<String>> {
+    async fn poll(&mut self) -> anyhow::Result<Vec<SourceLine>> {
         self.tailer.poll(&self.container).await
     }
     fn checkpoint(&self) -> Option<RegistryUpdate> {
@@ -87,7 +111,7 @@ impl Source for ApiSource {
     fn entry_path(&self) -> String {
         format!("api://{}", self.config.name)
     }
-    async fn poll(&mut self) -> anyhow::Result<Vec<String>> {
+    async fn poll(&mut self) -> anyhow::Result<Vec<SourceLine>> {
         self.tailer.poll(&self.config).await
     }
     fn checkpoint(&self) -> Option<RegistryUpdate> {
@@ -175,6 +199,9 @@ struct Runner<S: Source> {
     paused: bool,
     /// Entries dropped after exceeding max retries
     dropped_entries: u64,
+    /// Random per-run prefix for entry ids; a counter makes each id unique
+    id_prefix: String,
+    next_entry_id: u64,
 }
 
 impl<S: Source> Runner<S> {
@@ -241,15 +268,19 @@ impl<S: Source> Runner<S> {
             Ok(lines) => {
                 let lines_read = lines.len();
                 let before = self.buffer.len();
-                for line in lines {
-                    if self.cfg.filter.should_ship(&line) {
+                let read_at = Utc::now();
+                for SourceLine { text, timestamp } in lines {
+                    if self.cfg.filter.should_ship(&text) {
                         let line = match &self.cfg.masking {
-                            Some(m) => m.apply(&line),
-                            None => line,
+                            Some(m) => m.apply(&text),
+                            None => text,
                         };
+                        self.next_entry_id += 1;
                         self.buffer.push(LogEntry {
                             path: self.entry_path.clone(),
                             line,
+                            timestamp: timestamp.unwrap_or(read_at),
+                            id: format!("{}-{}", self.id_prefix, self.next_entry_id),
                         });
                     }
                 }
@@ -372,6 +403,8 @@ pub async fn run_source(
         last_flush: Instant::now(),
         paused: false,
         dropped_entries: 0,
+        id_prefix: uuid::Uuid::new_v4().simple().to_string(),
+        next_entry_id: 0,
         source,
         cfg,
     };
@@ -478,9 +511,9 @@ mod tests {
         fn entry_path(&self) -> String {
             "test".to_string()
         }
-        async fn poll(&mut self) -> anyhow::Result<Vec<String>> {
+        async fn poll(&mut self) -> anyhow::Result<Vec<SourceLine>> {
             let n = self.polls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![format!("line{}", n)])
+            Ok(vec![SourceLine::new(format!("line{}", n), None)])
         }
         fn checkpoint(&self) -> Option<RegistryUpdate> {
             None
@@ -544,6 +577,8 @@ mod tests {
             last_flush: Instant::now(),
             paused: false,
             dropped_entries: 0,
+            id_prefix: "test".to_string(),
+            next_entry_id: 0,
             source,
             cfg,
         };
