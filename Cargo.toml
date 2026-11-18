@@ -60,7 +60,15 @@ flate2 = "1.0"
 uuid = { version = "1", features = ["v4"] }
 
 # AWS S3 SDK (For S3 registry storage)
-aws-sdk-s3 = "1"
+# default-features off: the "rustls" default selects the SDK's legacy
+# hyper 0.14 / rustls 0.21 client, which has open RustSec advisories.
+# default-https-client uses hyper 1 + current rustls instead.
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+  "default-https-client",
+  "rt-tokio",
+  "http-1x",
+  "sigv4a",
+] }
 aws-config = "1"
 
 [dev-dependencies]
