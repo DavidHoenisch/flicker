@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// How long an unterminated last line may sit unchanged before it is shipped anyway
 const PARTIAL_LINE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bytes before the read position compared each poll to detect truncate-and-refill
+const FINGERPRINT_BYTES: u64 = 64;
 
 /// Tracks state for a single file being tailed
 struct FileState {
@@ -17,6 +19,8 @@ struct FileState {
     inode: u64,    // To detect file rotation
     /// Unterminated line at EOF: (its start offset, when first seen)
     partial: Option<(u64, Instant)>,
+    /// Up to FINGERPRINT_BYTES bytes just before `position`, to detect rewrites
+    fingerprint: Vec<u8>,
 }
 
 /// Manages tailing multiple log files
@@ -68,122 +72,186 @@ impl LogTailer {
             }
         };
 
-        #[cfg(unix)]
-        let current_inode = {
-            use std::os::unix::fs::MetadataExt;
-            metadata.ino()
-        };
-
-        #[cfg(not(unix))]
-        let current_inode = 0; // Windows doesn't have inodes
-
+        let current_inode = file_identity(&metadata);
         let current_size = metadata.len();
         let partial_line_timeout = self.partial_line_timeout;
+
+        // DESIGN CHOICE: Detect file rotation
+        // If the identity changed, the file was rotated (renamed and a new file created).
+        // Drain whatever was written to the old file before rotation, then read the new
+        // file from the start so nothing written since rotation is skipped.
+        if let Some(state) = self.files.get_mut(&path_buf)
+            && current_inode != state.inode
+        {
+            eprintln!("File {} rotated, draining old file and reopening", path);
+            let drained = state
+                .reader
+                .seek(SeekFrom::Start(state.position))
+                .and_then(|_| state.read_lines(&mut lines, Duration::ZERO));
+            if let Err(e) = drained {
+                eprintln!("Failed to drain rotated file {}: {}", path, e);
+            }
+            self.files.remove(&path_buf);
+            self.open(path, 0, current_inode)?;
+        }
 
         // Check if we're already tracking this file
         if let Some(state) = self.files.get_mut(&path_buf) {
             // DESIGN CHOICE: Detect file truncation
-            // If current file size < our position, the file was truncated
-            // This happens during log rotation when files are cleared
-            if current_size < state.position {
+            // A file smaller than our position, or whose bytes just before our position
+            // changed (truncated and refilled between polls), is read again from the start.
+            if current_size < state.position || !state.seek_to_position()? {
                 eprintln!("File {} truncated, resetting position", path);
                 state.position = 0;
+                state.partial = None;
+                state.fingerprint.clear();
                 state.reader.seek(SeekFrom::Start(0))?;
             }
 
-            // DESIGN CHOICE: Detect file rotation
-            // If inode changed, file was rotated (renamed and new file created)
-            // We need to reopen the file
-            #[cfg(unix)]
-            if current_inode != state.inode {
-                eprintln!("File {} rotated, reopening", path);
-                self.files.remove(&path_buf);
-                return self.poll(path); // Recursive call to reopen
-            }
-
-            // Seek to last position (in case file handle was disturbed)
-            state.reader.seek(SeekFrom::Start(state.position))?;
-
-            // DESIGN CHOICE: Read raw bytes and decode lossily. read_line() errors on
-            // invalid UTF-8, which would leave position stuck before the bad byte forever.
-            let mut pos = state.position;
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                let n = (&mut state.reader)
-                    .take(MAX_LINE_BYTES as u64)
-                    .read_until(b'\n', &mut buf)?;
-                if n == 0 {
-                    break;
-                }
-
-                // DESIGN CHOICE: Only ship complete lines. If the writer is mid-line,
-                // leave the position at the line start and wait for the rest. Ship it
-                // anyway if it stays unterminated past the timeout (e.g. a final line
-                // with no newline) or reaches MAX_LINE_BYTES (bounds memory).
-                if !buf.ends_with(b"\n") && n < MAX_LINE_BYTES {
-                    match state.partial {
-                        Some((start, since))
-                            if start == pos && since.elapsed() >= partial_line_timeout => {}
-                        Some((start, _)) if start == pos => break,
-                        _ => {
-                            state.partial = Some((pos, Instant::now()));
-                            break;
-                        }
-                    }
-                }
-                state.partial = None;
-                pos += n as u64;
-
-                // Remove trailing newline
-                if buf.ends_with(b"\n") {
-                    buf.pop();
-                    if buf.ends_with(b"\r") {
-                        buf.pop();
-                    }
-                }
-
-                lines.push(String::from_utf8_lossy(&buf).into_owned());
-            }
-
-            state.position = pos;
+            state.read_lines(&mut lines, partial_line_timeout)?;
         } else {
-            // First time seeing this file, open it
-            let file = File::open(&path_buf)?;
-            let mut reader = BufReader::new(file);
-
+            // First time seeing this file
             // Check if we have an initial position from registry
             let position = if let Some((saved_pos, saved_inode)) = self.initial_positions.get(path)
             {
                 // Use saved position if inode matches (file hasn't been rotated)
-                if *saved_inode == current_inode {
+                if *saved_inode == current_inode && *saved_pos <= current_size {
                     eprintln!("Resuming {} from registry position {}", path, saved_pos);
-                    reader.seek(SeekFrom::Start(*saved_pos))?
+                    Some(*saved_pos)
                 } else {
-                    eprintln!("File {} was rotated (inode changed), starting at end", path);
-                    reader.seek(SeekFrom::End(0))?
+                    // Rotated (or truncated) while we were stopped: everything in the
+                    // current file is new to us.
+                    eprintln!(
+                        "File {} changed since last run (rotated or truncated), starting at beginning",
+                        path
+                    );
+                    Some(0)
                 }
             } else {
                 // DESIGN CHOICE: Start at end of file for new files
                 // We don't want to ship the entire existing log on startup
                 // Only ship new lines that arrive after we start
                 eprintln!("Now tailing {} from position end", path);
-                reader.seek(SeekFrom::End(0))?
+                None
             };
-
-            self.files.insert(
-                path_buf.clone(),
-                FileState {
-                    reader,
-                    position,
-                    inode: current_inode,
-                    partial: None,
-                },
-            );
+            let position = position.unwrap_or(current_size);
+            self.open(path, position, current_inode)?;
         }
 
         Ok(lines)
     }
+
+    /// Start tracking a file at the given offset
+    fn open(&mut self, path: &str, position: u64, inode: u64) -> anyhow::Result<()> {
+        let mut reader = BufReader::new(File::open(path)?);
+        reader.seek(SeekFrom::Start(position))?;
+        let mut state = FileState {
+            reader,
+            position,
+            inode,
+            partial: None,
+            fingerprint: Vec::new(),
+        };
+        state.record_fingerprint()?;
+        self.files.insert(PathBuf::from(path), state);
+        Ok(())
+    }
+}
+
+impl FileState {
+    /// Seek to `position`, verifying the bytes just before it are unchanged.
+    /// Returns false if they differ (the file was truncated and rewritten).
+    fn seek_to_position(&mut self) -> std::io::Result<bool> {
+        let len = self.fingerprint.len() as u64;
+        self.reader.seek(SeekFrom::Start(self.position - len))?;
+        let mut current = vec![0u8; self.fingerprint.len()];
+        if self.reader.read_exact(&mut current).is_err() {
+            return Ok(false);
+        }
+        Ok(current == self.fingerprint)
+    }
+
+    /// Remember the bytes just before `position` (reader must be at `position`)
+    fn record_fingerprint(&mut self) -> std::io::Result<()> {
+        let len = self.position.min(FINGERPRINT_BYTES);
+        self.fingerprint = vec![0u8; len as usize];
+        self.reader.seek(SeekFrom::Start(self.position - len))?;
+        self.reader.read_exact(&mut self.fingerprint)
+    }
+
+    /// Read complete lines from the current reader position to EOF.
+    /// `partial_line_timeout` of zero ships a trailing unterminated line immediately.
+    fn read_lines(
+        &mut self,
+        lines: &mut Vec<String>,
+        partial_line_timeout: Duration,
+    ) -> std::io::Result<()> {
+        // DESIGN CHOICE: Read raw bytes and decode lossily. read_line() errors on
+        // invalid UTF-8, which would leave position stuck before the bad byte forever.
+        let start = self.position;
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            let n = (&mut self.reader)
+                .take(MAX_LINE_BYTES as u64)
+                .read_until(b'\n', &mut buf)?;
+            if n == 0 {
+                break;
+            }
+
+            // DESIGN CHOICE: Only ship complete lines. If the writer is mid-line,
+            // leave the position at the line start and wait for the rest. Ship it
+            // anyway if it stays unterminated past the timeout (e.g. a final line
+            // with no newline) or reaches MAX_LINE_BYTES (bounds memory).
+            if !buf.ends_with(b"\n") && n < MAX_LINE_BYTES && !partial_line_timeout.is_zero() {
+                match self.partial {
+                    Some((at, since))
+                        if at == self.position && since.elapsed() >= partial_line_timeout => {}
+                    Some((at, _)) if at == self.position => break,
+                    _ => {
+                        self.partial = Some((self.position, Instant::now()));
+                        break;
+                    }
+                }
+            }
+            self.partial = None;
+            self.position += n as u64;
+
+            // Remove trailing newline
+            if buf.ends_with(b"\n") {
+                buf.pop();
+                if buf.ends_with(b"\r") {
+                    buf.pop();
+                }
+            }
+
+            lines.push(String::from_utf8_lossy(&buf).into_owned());
+        }
+
+        if self.position != start {
+            self.record_fingerprint()?;
+        }
+        Ok(())
+    }
+}
+
+/// Stable identity for a file, used to detect rotation
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.ino()
+}
+
+/// Stable identity for a file, used to detect rotation.
+/// DESIGN CHOICE: No inodes off unix, so use creation time. The fingerprint check
+/// in seek_to_position catches rotations this misses (e.g. Windows tunneling).
+#[cfg(not(unix))]
+fn file_identity(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64)
 }
 
 #[cfg(test)]
@@ -280,6 +348,76 @@ mod tests {
         let lines = tailer.poll(&path).unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "New Line 1");
+    }
+
+    #[test]
+    fn test_tailer_detects_truncate_and_refill() {
+        let mut file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+
+        let mut tailer = LogTailer::new();
+        tailer.poll(&path).unwrap();
+        writeln!(file, "original line").unwrap();
+        file.flush().unwrap();
+        assert_eq!(tailer.poll(&path).unwrap(), vec!["original line"]);
+
+        // Truncate and write more than before, all between polls
+        file.as_file_mut().set_len(0).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        writeln!(file, "replacement content that is longer").unwrap();
+        file.flush().unwrap();
+
+        assert_eq!(
+            tailer.poll(&path).unwrap(),
+            vec!["replacement content that is longer"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_tailer_rotation_drains_old_and_reads_new_from_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.log");
+        let path_str = path.to_str().unwrap().to_string();
+        let mut file = File::create(&path).unwrap();
+
+        let mut tailer = LogTailer::new();
+        tailer.poll(&path_str).unwrap();
+        writeln!(file, "before").unwrap();
+        assert_eq!(tailer.poll(&path_str).unwrap(), vec!["before"]);
+
+        // Written after the last poll, just before rotation
+        writeln!(file, "late old").unwrap();
+        write!(file, "unterminated old").unwrap();
+        std::fs::rename(&path, dir.path().join("app.log.1")).unwrap();
+
+        // New file gets lines before the next poll
+        let mut new_file = File::create(&path).unwrap();
+        writeln!(new_file, "first new").unwrap();
+
+        assert_eq!(
+            tailer.poll(&path_str).unwrap(),
+            vec!["late old", "unterminated old", "first new"]
+        );
+
+        writeln!(new_file, "second new").unwrap();
+        assert_eq!(tailer.poll(&path_str).unwrap(), vec!["second new"]);
+    }
+
+    #[test]
+    fn test_tailer_resume_after_rotation_starts_at_beginning() {
+        let mut file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+        writeln!(file, "new file line").unwrap();
+        file.flush().unwrap();
+
+        let mut tailer = LogTailer::new();
+        // Registry says a different file, far past this one's end
+        tailer.set_initial_position(path.clone(), 10_000, u64::MAX);
+        tailer.poll(&path).unwrap();
+        writeln!(file, "next").unwrap();
+        file.flush().unwrap();
+        assert_eq!(tailer.poll(&path).unwrap(), vec!["new file line", "next"]);
     }
 
     #[test]
