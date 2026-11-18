@@ -2,6 +2,9 @@
 name = "flicker"
 version = "0.4.3"
 edition = "2024"
+# Minimum supported Rust: required by the AWS SDK crates in Cargo.lock.
+# Keep in sync with rust-toolchain.toml and the CI workflows.
+rust-version = "1.94.1"
 
 [dependencies]
 # The Async Runtime (Go's scheduler equivalent)

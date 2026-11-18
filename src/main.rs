@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         tasks.spawn(run_source(
-            FileSource { tailer, path },
+            FileSource::new(tailer, path),
             pipeline,
             shutdown_rx.clone(),
         ));

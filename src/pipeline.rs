@@ -15,6 +15,7 @@ use crate::tailer::LogTailer;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
@@ -51,8 +52,18 @@ pub trait Source: Send {
 }
 
 pub struct FileSource {
-    pub tailer: LogTailer,
+    // Shared with spawn_blocking; only one poll runs at a time
+    pub tailer: Arc<std::sync::Mutex<LogTailer>>,
     pub path: String,
+}
+
+impl FileSource {
+    pub fn new(tailer: LogTailer, path: String) -> Self {
+        Self {
+            tailer: Arc::new(std::sync::Mutex::new(tailer)),
+            path,
+        }
+    }
 }
 
 #[async_trait]
@@ -64,16 +75,25 @@ impl Source for FileSource {
         self.path.clone()
     }
     async fn poll(&mut self) -> anyhow::Result<Vec<SourceLine>> {
+        // DESIGN CHOICE: File reads are blocking; run them on the blocking pool
+        // so a slow disk can't stall the tokio worker threads.
+        let tailer = self.tailer.clone();
+        let path = self.path.clone();
+        let lines = tokio::task::spawn_blocking(move || {
+            tailer.lock().unwrap_or_else(|e| e.into_inner()).poll(&path)
+        })
+        .await??;
         // Plain files carry no structured timestamp; the read time is used
-        Ok(self
-            .tailer
-            .poll(&self.path)?
+        Ok(lines
             .into_iter()
             .map(|line| SourceLine::new(line, None))
             .collect())
     }
     fn checkpoint(&self) -> Option<RegistryUpdate> {
-        self.tailer.checkpoint(&self.path)
+        self.tailer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .checkpoint(&self.path)
     }
 }
 
