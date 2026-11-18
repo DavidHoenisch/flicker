@@ -17,7 +17,6 @@ pub struct ApiTailer {
     client: Client,
     sources: HashMap<String, ApiSourceState>,
     initial_positions: HashMap<String, (DateTime<Utc>, Option<String>)>, // name -> (timestamp, cursor)
-    registry_tx: Option<tokio::sync::mpsc::UnboundedSender<RegistryUpdate>>,
 }
 
 impl ApiTailer {
@@ -31,13 +30,17 @@ impl ApiTailer {
             client,
             sources: HashMap::new(),
             initial_positions: HashMap::new(),
-            registry_tx: None,
         })
     }
 
-    /// Set the registry channel for sending position updates
-    pub fn set_registry_sender(&mut self, tx: tokio::sync::mpsc::UnboundedSender<RegistryUpdate>) {
-        self.registry_tx = Some(tx);
+    /// Current position for an API source, for persisting to the registry
+    pub fn checkpoint(&self, name: &str) -> Option<RegistryUpdate> {
+        let state = self.sources.get(name)?;
+        Some(RegistryUpdate::UpdateApiSource {
+            name: name.to_string(),
+            last_timestamp: state.last_timestamp?,
+            cursor: state.cursor.clone(),
+        })
     }
 
     /// Set initial position for an API source (loaded from registry)
@@ -286,18 +289,7 @@ impl ApiTailer {
         {
             let state = self.sources.get_mut(&config.name).unwrap();
             state.last_timestamp = latest_timestamp;
-            state.cursor = latest_cursor.clone();
-        }
-
-        // Send registry update
-        if !all_lines.is_empty()
-            && let Some(tx) = &self.registry_tx
-        {
-            let _ = tx.send(RegistryUpdate::UpdateApiSource {
-                name: config.name.clone(),
-                last_timestamp: latest_timestamp.unwrap_or_else(Utc::now),
-                cursor: latest_cursor,
-            });
+            state.cursor = latest_cursor;
         }
 
         eprintln!(

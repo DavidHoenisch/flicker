@@ -4,26 +4,27 @@ mod destinations;
 mod docker_tailer;
 mod filter;
 mod masking;
+mod pipeline;
 mod registry;
 mod registry_storage;
 mod retry_queue;
 mod tailer;
 
 use crate::api_tailer::ApiTailer;
-use crate::config::Config;
-use crate::destinations::{LogEntry, create_destination};
+use crate::config::{Config, DestinationConfig};
+use crate::destinations::create_destination;
 use crate::docker_tailer::DockerTailer;
 use crate::filter::LogFilter;
-use crate::masking::MaskingEngine;
-use crate::registry::{Registry, registry_writer_task};
+use crate::masking::{MaskingConfig, MaskingEngine};
+use crate::pipeline::{ApiSource, DockerSource, FileSource, PipelineConfig, run_source};
+use crate::registry::{Registry, RegistryUpdate, registry_writer_task};
 use crate::registry_storage::{FileSystemStorage, RegistryStorage, S3Storage};
-use crate::retry_queue::RetryQueue;
+use crate::retry_queue::RetryConfig;
 use crate::tailer::LogTailer;
 use clap::Parser;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -99,502 +100,126 @@ async fn main() -> anyhow::Result<()> {
     let mut handles = vec![];
 
     let retry_config = cfg.retry.to_retry_config();
+    let registry_sender = registry_tx.as_ref().map(|(tx, _)| tx.clone());
+    let registry = registry_tx.as_ref().map(|(_, r)| r);
 
     for log_file in cfg.log_files {
         let path = log_file.path.clone();
-        let freq = log_file.polling_frequency_ms;
-        let buffer_size = log_file.buffer_size;
-        let flush_interval = Duration::from_millis(log_file.flush_interval_ms);
-        let dest_type = log_file.destination.dest_type.clone();
-        let retry_cfg = retry_config.clone();
-
-        let dest = match create_destination(&log_file.destination) {
-            Ok(d) => d,
+        let pipeline = match build_pipeline(
+            &path,
+            &SourceSettings {
+                polling_frequency_ms: log_file.polling_frequency_ms,
+                buffer_size: log_file.buffer_size,
+                flush_interval_ms: log_file.flush_interval_ms,
+                destination: &log_file.destination,
+                match_on: &log_file.match_on,
+                exclude_on: &log_file.exclude_on,
+                masking: &log_file.masking,
+            },
+            &retry_config,
+            &registry_sender,
+        ) {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!("Failed to create destination for {}: {}", path, e);
+                eprintln!("Failed to set up {}: {}", path, e);
                 continue; // Skip this file and continue with others
             }
         };
 
-        let filter = match LogFilter::new(log_file.match_on.clone(), log_file.exclude_on.clone()) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Failed to create filter for {}: {}", path, e);
-                continue; // Skip this file and continue with others
-            }
-        };
+        let mut tailer = LogTailer::new();
+        if let Some(pos) = registry.and_then(|r| r.get_file_position(&path)) {
+            tailer.set_initial_position(path.clone(), pos.position, pos.inode);
+        }
 
-        let masking = match MaskingEngine::new(&log_file.masking) {
-            Ok(m) => {
-                if m.is_some() {
-                    println!("Masking enabled for {}", path);
-                } else {
-                    println!("Masking config present but no active rules for {}", path);
-                }
-                m
-            }
-            Err(e) => {
-                eprintln!("Failed to create masking engine for {}: {}", path, e);
-                continue; // Skip this file and continue with others
-            }
-        };
-
-        // Get registry data if tracking is enabled
-        let (registry_sender, initial_position) = if let Some((ref tx, ref registry)) = registry_tx
-        {
-            let pos = registry.get_file_position(&path);
-            (Some(tx.clone()), pos)
-        } else {
-            (None, None)
-        };
-
-        let handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut tailer = LogTailer::new();
-            let mut retry_queue = RetryQueue::new(retry_cfg);
-
-            // Set up registry tracking if enabled
-            if let Some(tx) = registry_sender {
-                tailer.set_registry_sender(tx);
-            }
-            if let Some(pos) = initial_position {
-                tailer.set_initial_position(path.clone(), pos.position, pos.inode);
-            }
-            let mut interval = time::interval(Duration::from_millis(freq));
-
-            let mut buffer: Vec<LogEntry> = Vec::with_capacity(buffer_size);
-            let mut last_flush = Instant::now();
-
-            let filter_info = if filter.is_passthrough() {
-                "no filters".to_string()
-            } else {
-                "with filters".to_string()
-            };
-
-            println!(
-                "Tailing {} every {}ms (buffer: {} lines, flush: {}ms, {}) -> {} destination",
-                path, freq, buffer_size, log_file.flush_interval_ms, filter_info, dest_type
-            );
-
-            loop {
-                interval.tick().await;
-
-                // First, try to send any batches from the retry queue
-                let ready_batches = retry_queue.get_ready_batches();
-                for (entries, retry_count) in ready_batches {
-                    println!(
-                        "[Retry] Attempting to resend batch of {} entries from {} (retry {})",
-                        entries.len(),
-                        path,
-                        retry_count + 1
-                    );
-
-                    if let Err(e) = dest.send_batch(entries.clone()).await {
-                        eprintln!("[Retry] Failed to resend batch from {}: {}", path, e);
-                        retry_queue.retry_failed(entries, retry_count);
-                    } else {
-                        println!("[Retry] Successfully resent batch from {}", path);
-                    }
-                }
-
-                // Poll this file for new lines
-                match tailer.poll(&path) {
-                    Ok(lines) => {
-                        let mut lines_read = 0;
-                        let mut lines_shipped = 0;
-                        for line in lines {
-                            lines_read += 1;
-                            if filter.should_ship(&line) {
-                                lines_shipped += 1;
-                                let masked_line = masking
-                                    .as_ref()
-                                    .map_or_else(|| line.clone(), |m| m.apply(&line));
-                                buffer.push(LogEntry {
-                                    path: path.clone(),
-                                    line: masked_line,
-                                });
-                            }
-                        }
-
-                        if lines_read > 0 {
-                            println!(
-                                "[{}] Read {} lines, shipped {} (buffer: {})",
-                                path,
-                                lines_read,
-                                lines_shipped,
-                                buffer.len()
-                            );
-                        }
-
-                        let buffer_full = buffer.len() >= buffer_size;
-                        let time_elapsed = last_flush.elapsed() >= flush_interval;
-
-                        if buffer_full || (time_elapsed && !buffer.is_empty()) {
-                            let reason = if buffer_full {
-                                "buffer full"
-                            } else {
-                                "time elapsed"
-                            };
-                            println!(
-                                "Flushing {} entries from {} ({})",
-                                buffer.len(),
-                                path,
-                                reason
-                            );
-
-                            if let Err(e) = dest.send_batch(buffer.clone()).await {
-                                eprintln!("Failed to ship batch from {}: {}", path, e);
-                                // Add failed batch to retry queue
-                                retry_queue.add_failed_batch(buffer.clone(), 0);
-                            }
-
-                            buffer.clear();
-                            last_flush = Instant::now();
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error polling {}: {}", path, e);
-                    }
-                }
-            }
-            #[allow(unreachable_code)]
-            Ok(())
-        });
-
-        handles.push(handle);
+        handles.push(tokio::spawn(run_source(
+            FileSource { tailer, path },
+            pipeline,
+        )));
     }
 
-    // Spawn tasks for Docker containers
     for docker_container in cfg.docker_containers {
         let container = docker_container.container.clone();
-        let freq = docker_container.polling_frequency_ms;
-        let buffer_size = docker_container.buffer_size;
-        let flush_interval = Duration::from_millis(docker_container.flush_interval_ms);
-        let dest_type = docker_container.destination.dest_type.clone();
-        let retry_cfg = retry_config.clone();
-
-        let dest = match create_destination(&docker_container.destination) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!(
-                    "Failed to create destination for container {}: {}",
-                    container, e
-                );
-                continue; // Skip this container and continue with others
-            }
-        };
-
-        let filter = match LogFilter::new(
-            docker_container.match_on.clone(),
-            docker_container.exclude_on.clone(),
+        let label = format!("Docker container {}", container);
+        let pipeline = match build_pipeline(
+            &label,
+            &SourceSettings {
+                polling_frequency_ms: docker_container.polling_frequency_ms,
+                buffer_size: docker_container.buffer_size,
+                flush_interval_ms: docker_container.flush_interval_ms,
+                destination: &docker_container.destination,
+                match_on: &docker_container.match_on,
+                exclude_on: &docker_container.exclude_on,
+                masking: &docker_container.masking,
+            },
+            &retry_config,
+            &registry_sender,
         ) {
-            Ok(f) => f,
+            Ok(p) => p,
             Err(e) => {
-                eprintln!("Failed to create filter for container {}: {}", container, e);
+                eprintln!("Failed to set up {}: {}", label, e);
                 continue; // Skip this container and continue with others
             }
         };
 
-        let masking = match MaskingEngine::new(&docker_container.masking) {
-            Ok(m) => m,
+        let mut tailer = match DockerTailer::new() {
+            Ok(t) => t,
             Err(e) => {
-                eprintln!(
-                    "Failed to create masking engine for container {}: {}",
-                    container, e
-                );
-                continue; // Skip this container and continue with others
+                eprintln!("Failed to create Docker tailer for {}: {}", container, e);
+                continue;
             }
         };
+        if let Some(pos) = registry.and_then(|r| r.get_container_position(&container)) {
+            tailer.set_initial_timestamp(container.clone(), pos.last_timestamp);
+        }
 
-        // Get registry data if tracking is enabled
-        let (registry_sender, initial_timestamp) = if let Some((ref tx, ref registry)) = registry_tx
-        {
-            let pos = registry.get_container_position(&container);
-            (Some(tx.clone()), pos.map(|p| p.last_timestamp))
-        } else {
-            (None, None)
-        };
-
-        let handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut tailer = match DockerTailer::new() {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("Failed to create Docker tailer for {}: {}", container, e);
-                    return Err(e);
-                }
-            };
-            let mut retry_queue = RetryQueue::new(retry_cfg);
-
-            // Set up registry tracking if enabled
-            if let Some(tx) = registry_sender {
-                tailer.set_registry_sender(tx);
-            }
-            if let Some(ts) = initial_timestamp {
-                tailer.set_initial_timestamp(container.clone(), ts);
-            }
-            let mut interval = time::interval(Duration::from_millis(freq));
-
-            let mut buffer: Vec<LogEntry> = Vec::with_capacity(buffer_size);
-            let mut last_flush = Instant::now();
-
-            let filter_info = if filter.is_passthrough() {
-                "no filters".to_string()
-            } else {
-                "with filters".to_string()
-            };
-
-            println!(
-                "Tailing Docker container {} every {}ms (buffer: {} lines, flush: {}ms, {}) -> {} destination",
-                container,
-                freq,
-                buffer_size,
-                docker_container.flush_interval_ms,
-                filter_info,
-                dest_type
-            );
-
-            loop {
-                interval.tick().await;
-
-                // First, try to send any batches from the retry queue
-                let ready_batches = retry_queue.get_ready_batches();
-                for (entries, retry_count) in ready_batches {
-                    println!(
-                        "[Retry] Attempting to resend batch of {} entries from Docker container {} (retry {})",
-                        entries.len(),
-                        container,
-                        retry_count + 1
-                    );
-
-                    if let Err(e) = dest.send_batch(entries.clone()).await {
-                        eprintln!(
-                            "[Retry] Failed to resend batch from Docker container {}: {}",
-                            container, e
-                        );
-                        retry_queue.retry_failed(entries, retry_count);
-                    } else {
-                        println!(
-                            "[Retry] Successfully resent batch from Docker container {}",
-                            container
-                        );
-                    }
-                }
-
-                // Poll this container for new lines
-                match tailer.poll(&container).await {
-                    Ok(lines) => {
-                        for line in lines {
-                            if filter.should_ship(&line) {
-                                let masked_line = masking
-                                    .as_ref()
-                                    .map_or_else(|| line.clone(), |m| m.apply(&line));
-                                buffer.push(LogEntry {
-                                    path: format!("docker://{}", container),
-                                    line: masked_line,
-                                });
-                            }
-                        }
-
-                        let buffer_full = buffer.len() >= buffer_size;
-                        let time_elapsed = last_flush.elapsed() >= flush_interval;
-
-                        if buffer_full || (time_elapsed && !buffer.is_empty()) {
-                            let reason = if buffer_full {
-                                "buffer full"
-                            } else {
-                                "time elapsed"
-                            };
-                            println!(
-                                "Flushing {} entries from Docker container {} ({})",
-                                buffer.len(),
-                                container,
-                                reason
-                            );
-
-                            if let Err(e) = dest.send_batch(buffer.clone()).await {
-                                eprintln!(
-                                    "Failed to ship batch from Docker container {}: {}",
-                                    container, e
-                                );
-                                // Add failed batch to retry queue
-                                retry_queue.add_failed_batch(buffer.clone(), 0);
-                            }
-
-                            buffer.clear();
-                            last_flush = Instant::now();
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error polling Docker container {}: {}", container, e);
-                    }
-                }
-            }
-            #[allow(unreachable_code)]
-            Ok(())
-        });
-
-        handles.push(handle);
+        handles.push(tokio::spawn(run_source(
+            DockerSource { tailer, container },
+            pipeline,
+        )));
     }
 
-    // Spawn tasks for API sources
     for api_source in cfg.api_sources {
         let name = api_source.name.clone();
-        let freq = api_source.polling_frequency_ms;
-        let buffer_size = api_source.buffer_size;
-        let flush_interval = Duration::from_millis(api_source.flush_interval_ms);
-        let dest_type = api_source.destination.dest_type.clone();
-        let retry_cfg = retry_config.clone();
-        let api_config = api_source.clone();
-
-        let dest = match create_destination(&api_source.destination) {
-            Ok(d) => d,
+        let label = format!("API source {}", name);
+        let pipeline = match build_pipeline(
+            &label,
+            &SourceSettings {
+                polling_frequency_ms: api_source.polling_frequency_ms,
+                buffer_size: api_source.buffer_size,
+                flush_interval_ms: api_source.flush_interval_ms,
+                destination: &api_source.destination,
+                match_on: &api_source.match_on,
+                exclude_on: &api_source.exclude_on,
+                masking: &api_source.masking,
+            },
+            &retry_config,
+            &registry_sender,
+        ) {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!(
-                    "Failed to create destination for API source {}: {}",
-                    name, e
-                );
+                eprintln!("Failed to set up {}: {}", label, e);
                 continue; // Skip this API source and continue with others
             }
         };
 
-        let filter =
-            match LogFilter::new(api_source.match_on.clone(), api_source.exclude_on.clone()) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Failed to create filter for API source {}: {}", name, e);
-                    continue; // Skip this API source and continue with others
-                }
-            };
-
-        let masking = match MaskingEngine::new(&api_source.masking) {
-            Ok(m) => m,
+        let mut tailer = match ApiTailer::new() {
+            Ok(t) => t,
             Err(e) => {
-                eprintln!(
-                    "Failed to create masking engine for API source {}: {}",
-                    name, e
-                );
-                continue; // Skip this API source and continue with others
+                eprintln!("Failed to create API tailer for {}: {}", name, e);
+                continue;
             }
         };
+        if let Some(pos) = registry.and_then(|r| r.get_api_position(&name)) {
+            tailer.set_initial_position(name.clone(), pos.last_timestamp, pos.cursor);
+        }
 
-        // Get registry data if tracking is enabled
-        let (registry_sender, initial_position) = if let Some((ref tx, ref registry)) = registry_tx
-        {
-            let pos = registry.get_api_position(&name);
-            (Some(tx.clone()), pos.map(|p| (p.last_timestamp, p.cursor)))
-        } else {
-            (None, None)
-        };
-
-        let handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut tailer = match ApiTailer::new() {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("Failed to create API tailer for {}: {}", name, e);
-                    return Err(e);
-                }
-            };
-
-            let mut retry_queue = RetryQueue::new(retry_cfg);
-
-            // Set up registry tracking if enabled
-            if let Some(tx) = registry_sender {
-                tailer.set_registry_sender(tx);
-            }
-            if let Some((ts, cursor)) = initial_position {
-                tailer.set_initial_position(name.clone(), ts, cursor);
-            }
-
-            let mut interval = time::interval(Duration::from_millis(freq));
-
-            let mut buffer: Vec<LogEntry> = Vec::with_capacity(buffer_size);
-            let mut last_flush = Instant::now();
-
-            let filter_info = if filter.is_passthrough() {
-                "no filters".to_string()
-            } else {
-                "with filters".to_string()
-            };
-
-            println!(
-                "Tailing API source {} every {}ms (buffer: {} lines, flush: {}ms, {}) -> {} destination",
-                name, freq, buffer_size, api_config.flush_interval_ms, filter_info, dest_type
-            );
-
-            loop {
-                interval.tick().await;
-
-                // First, try to send any batches from the retry queue
-                let ready_batches = retry_queue.get_ready_batches();
-                for (entries, retry_count) in ready_batches {
-                    println!(
-                        "[Retry] Attempting to resend batch of {} entries from API source {} (retry {})",
-                        entries.len(),
-                        name,
-                        retry_count + 1
-                    );
-
-                    if let Err(e) = dest.send_batch(entries.clone()).await {
-                        eprintln!(
-                            "[Retry] Failed to resend batch from API source {}: {}",
-                            name, e
-                        );
-                        retry_queue.retry_failed(entries, retry_count);
-                    } else {
-                        println!("[Retry] Successfully resent batch from API source {}", name);
-                    }
-                }
-
-                // Poll this API source for new entries
-                match tailer.poll(&api_config).await {
-                    Ok(lines) => {
-                        for line in lines {
-                            if filter.should_ship(&line) {
-                                let masked_line = masking
-                                    .as_ref()
-                                    .map_or_else(|| line.clone(), |m| m.apply(&line));
-                                buffer.push(LogEntry {
-                                    path: format!("api://{}", name),
-                                    line: masked_line,
-                                });
-                            }
-                        }
-
-                        let buffer_full = buffer.len() >= buffer_size;
-                        let time_elapsed = last_flush.elapsed() >= flush_interval;
-
-                        if buffer_full || (time_elapsed && !buffer.is_empty()) {
-                            let reason = if buffer_full {
-                                "buffer full"
-                            } else {
-                                "time elapsed"
-                            };
-                            println!(
-                                "Flushing {} entries from API source {} ({})",
-                                buffer.len(),
-                                name,
-                                reason
-                            );
-
-                            if let Err(e) = dest.send_batch(buffer.clone()).await {
-                                eprintln!("Failed to ship batch from API source {}: {}", name, e);
-                                // Add failed batch to retry queue
-                                retry_queue.add_failed_batch(buffer.clone(), 0);
-                            }
-
-                            buffer.clear();
-                            last_flush = Instant::now();
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error polling API source {}: {}", name, e);
-                    }
-                }
-            }
-            #[allow(unreachable_code)]
-            Ok(())
-        });
-
-        handles.push(handle);
+        handles.push(tokio::spawn(run_source(
+            ApiSource {
+                tailer,
+                config: api_source,
+            },
+            pipeline,
+        )));
     }
 
     for handle in handles {
@@ -605,4 +230,58 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Per-source settings shared by all source types
+struct SourceSettings<'a> {
+    polling_frequency_ms: u64,
+    buffer_size: usize,
+    flush_interval_ms: u64,
+    destination: &'a DestinationConfig,
+    match_on: &'a [String],
+    exclude_on: &'a [String],
+    masking: &'a MaskingConfig,
+}
+
+/// Build destination, filter and masking for a source
+fn build_pipeline(
+    label: &str,
+    settings: &SourceSettings,
+    retry: &RetryConfig,
+    registry_tx: &Option<mpsc::UnboundedSender<RegistryUpdate>>,
+) -> anyhow::Result<PipelineConfig> {
+    let destination = create_destination(settings.destination)
+        .map_err(|e| anyhow::anyhow!("destination: {}", e))?;
+    let filter = LogFilter::new(settings.match_on.to_vec(), settings.exclude_on.to_vec())
+        .map_err(|e| anyhow::anyhow!("filter: {}", e))?;
+    let masking =
+        MaskingEngine::new(settings.masking).map_err(|e| anyhow::anyhow!("masking: {}", e))?;
+    if masking.is_some() {
+        println!("Masking enabled for {}", label);
+    }
+
+    println!(
+        "Tailing {} every {}ms (buffer: {} lines, flush: {}ms, {}) -> {} destination",
+        label,
+        settings.polling_frequency_ms,
+        settings.buffer_size,
+        settings.flush_interval_ms,
+        if filter.is_passthrough() {
+            "no filters"
+        } else {
+            "with filters"
+        },
+        settings.destination.dest_type
+    );
+
+    Ok(PipelineConfig {
+        polling_frequency: Duration::from_millis(settings.polling_frequency_ms),
+        buffer_size: settings.buffer_size,
+        flush_interval: Duration::from_millis(settings.flush_interval_ms),
+        filter,
+        masking,
+        destination,
+        retry: retry.clone(),
+        registry_tx: registry_tx.clone(),
+    })
 }

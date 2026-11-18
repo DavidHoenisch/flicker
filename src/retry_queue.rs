@@ -35,6 +35,7 @@ impl Default for RetryConfig {
 /// A batch waiting to be retried
 #[derive(Debug)]
 struct RetryBatch {
+    seq: u64,
     entries: Vec<LogEntry>,
     retry_count: u32,
     next_retry_time: Instant,
@@ -55,16 +56,22 @@ impl RetryQueue {
         }
     }
 
-    /// Add a failed batch to the retry queue
-    /// Returns true if batch was added, false if queue is full
-    pub fn add_failed_batch(&mut self, entries: Vec<LogEntry>, retry_count: u32) -> bool {
+    /// Add a failed batch to the retry queue.
+    /// Returns the seq of a batch dropped to make room, if the queue was full.
+    pub fn add_failed_batch(
+        &mut self,
+        seq: u64,
+        entries: Vec<LogEntry>,
+        retry_count: u32,
+    ) -> Option<u64> {
+        let mut dropped = None;
         if self.queue.len() >= self.config.max_queue_size {
             eprintln!(
                 "[Retry] Queue full ({} batches), dropping oldest batch",
                 self.config.max_queue_size
             );
             // Drop oldest batch to make room
-            self.queue.pop_front();
+            dropped = self.queue.pop_front().map(|b| b.seq);
         }
 
         // Calculate next retry time using exponential backoff
@@ -72,6 +79,7 @@ impl RetryQueue {
         let next_retry_time = Instant::now() + delay;
 
         self.queue.push_back(RetryBatch {
+            seq,
             entries,
             retry_count,
             next_retry_time,
@@ -84,12 +92,12 @@ impl RetryQueue {
             self.queue.len()
         );
 
-        true
+        dropped
     }
 
     /// Get batches that are ready for retry
-    /// Returns a vector of (entries, retry_count) tuples
-    pub fn get_ready_batches(&mut self) -> Vec<(Vec<LogEntry>, u32)> {
+    /// Returns a vector of (seq, entries, retry_count) tuples
+    pub fn get_ready_batches(&mut self) -> Vec<(u64, Vec<LogEntry>, u32)> {
         let now = Instant::now();
         let mut ready = Vec::new();
 
@@ -100,7 +108,7 @@ impl RetryQueue {
         while let Some(batch) = self.queue.pop_front() {
             if batch.next_retry_time <= now {
                 // This batch is ready for retry
-                ready.push((batch.entries, batch.retry_count));
+                ready.push((batch.seq, batch.entries, batch.retry_count));
             } else {
                 // This batch isn't ready yet, keep it in the queue
                 remaining.push_back(batch);
@@ -117,19 +125,22 @@ impl RetryQueue {
         ready
     }
 
-    /// Re-add a batch that failed retry (increments retry count)
-    /// Returns true if batch was re-added, false if max retries exceeded
-    pub fn retry_failed(&mut self, entries: Vec<LogEntry>, retry_count: u32) -> bool {
+    /// Re-add a batch that failed retry (increments retry count).
+    /// Returns the seqs of any batches dropped (this one if max retries exceeded,
+    /// or the oldest if the queue was full).
+    pub fn retry_failed(&mut self, seq: u64, entries: Vec<LogEntry>, retry_count: u32) -> Vec<u64> {
         if retry_count >= self.config.max_retries {
             eprintln!(
                 "[Retry] Max retries ({}) exceeded, dropping batch of {} entries",
                 self.config.max_retries,
                 entries.len()
             );
-            return false;
+            return vec![seq];
         }
 
-        self.add_failed_batch(entries, retry_count + 1)
+        self.add_failed_batch(seq, entries, retry_count + 1)
+            .into_iter()
+            .collect()
     }
 
     /// Calculate exponential backoff delay
@@ -158,7 +169,7 @@ mod tests {
         let entries = vec![create_test_entry("test line")];
 
         // Add batch with retry_count = 0
-        assert!(queue.add_failed_batch(entries.clone(), 0));
+        assert!(queue.add_failed_batch(1, entries.clone(), 0).is_none());
 
         // Batch should be ready immediately (for testing)
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -169,7 +180,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         let ready = queue.get_ready_batches();
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].1, 0); // retry_count
+        assert_eq!(ready[0].0, 1); // seq
+        assert_eq!(ready[0].2, 0); // retry_count
     }
 
     #[test]
@@ -207,12 +219,12 @@ mod tests {
         let entries = vec![create_test_entry("test line")];
 
         // Retry count 0, 1, 2 should succeed
-        assert!(queue.retry_failed(entries.clone(), 0));
-        assert!(queue.retry_failed(entries.clone(), 1));
-        assert!(queue.retry_failed(entries.clone(), 2));
+        assert!(queue.retry_failed(1, entries.clone(), 0).is_empty());
+        assert!(queue.retry_failed(2, entries.clone(), 1).is_empty());
+        assert!(queue.retry_failed(3, entries.clone(), 2).is_empty());
 
-        // Retry count 3 should fail (equals max_retries)
-        assert!(!queue.retry_failed(entries.clone(), 3));
+        // Retry count 3 should fail (equals max_retries) and report the dropped seq
+        assert_eq!(queue.retry_failed(4, entries.clone(), 3), vec![4]);
     }
 
     #[test]
@@ -226,10 +238,12 @@ mod tests {
         let mut queue = RetryQueue::new(config);
 
         // Add 4 batches (exceeds max_queue_size of 3)
+        let mut dropped = Vec::new();
         for i in 0..4 {
             let entries = vec![create_test_entry(&format!("line {}", i))];
-            queue.add_failed_batch(entries, 0);
+            dropped.extend(queue.add_failed_batch(i, entries, 0));
         }
+        assert_eq!(dropped, vec![0]);
 
         // Queue should only have 3 items (oldest was dropped)
         // Wait for all batches to be ready
@@ -249,9 +263,9 @@ mod tests {
         let mut queue = RetryQueue::new(config);
 
         // Add batches with different retry counts (different delays)
-        queue.add_failed_batch(vec![create_test_entry("batch_400ms")], 2); // 400ms delay
-        queue.add_failed_batch(vec![create_test_entry("batch_100ms")], 0); // 100ms delay
-        queue.add_failed_batch(vec![create_test_entry("batch_200ms")], 1); // 200ms delay
+        queue.add_failed_batch(1, vec![create_test_entry("batch_400ms")], 2); // 400ms delay
+        queue.add_failed_batch(2, vec![create_test_entry("batch_100ms")], 0); // 100ms delay
+        queue.add_failed_batch(3, vec![create_test_entry("batch_200ms")], 1); // 200ms delay
 
         // Collect all batches as they become ready
         // Windows timing can be imprecise, so we verify the order rather than exact timing
@@ -265,21 +279,21 @@ mod tests {
             "Expected at least one batch ready after 250ms"
         );
         for batch in &ready {
-            collected_order.push(batch.0[0].line.clone());
+            collected_order.push(batch.1[0].line.clone());
         }
 
         // Wait for second batch (200ms) - should be ready by now
         std::thread::sleep(std::time::Duration::from_millis(150));
         let ready = queue.get_ready_batches();
         for batch in &ready {
-            collected_order.push(batch.0[0].line.clone());
+            collected_order.push(batch.1[0].line.clone());
         }
 
         // Wait for third batch (400ms) - should be ready by now
         std::thread::sleep(std::time::Duration::from_millis(200));
         let ready = queue.get_ready_batches();
         for batch in &ready {
-            collected_order.push(batch.0[0].line.clone());
+            collected_order.push(batch.1[0].line.clone());
         }
 
         // Verify all batches were collected

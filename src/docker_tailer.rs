@@ -14,7 +14,6 @@ pub struct DockerTailer {
     docker: Docker,
     containers: HashMap<String, ContainerState>,
     initial_timestamps: HashMap<String, DateTime<Utc>>, // container -> last_timestamp
-    registry_tx: Option<tokio::sync::mpsc::UnboundedSender<RegistryUpdate>>,
 }
 
 impl DockerTailer {
@@ -26,13 +25,16 @@ impl DockerTailer {
             docker,
             containers: HashMap::new(),
             initial_timestamps: HashMap::new(),
-            registry_tx: None,
         })
     }
 
-    /// Set the registry channel for sending position updates
-    pub fn set_registry_sender(&mut self, tx: tokio::sync::mpsc::UnboundedSender<RegistryUpdate>) {
-        self.registry_tx = Some(tx);
+    /// Current position for a container, for persisting to the registry
+    pub fn checkpoint(&self, container: &str) -> Option<RegistryUpdate> {
+        let ts = self.containers.get(container)?.last_timestamp?;
+        Some(RegistryUpdate::UpdateContainer {
+            container: container.to_string(),
+            last_timestamp: ts,
+        })
     }
 
     /// Set initial timestamp for a container (loaded from registry)
@@ -133,16 +135,6 @@ impl DockerTailer {
 
         // Update state with latest timestamp
         state.last_timestamp = latest_timestamp;
-
-        // Send update to registry if enabled
-        if let Some(ref tx) = self.registry_tx
-            && let Some(ts) = latest_timestamp
-        {
-            let _ = tx.send(RegistryUpdate::UpdateContainer {
-                container: container.to_string(),
-                last_timestamp: ts,
-            });
-        }
 
         Ok(lines)
     }

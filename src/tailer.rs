@@ -15,7 +15,6 @@ struct FileState {
 pub struct LogTailer {
     files: HashMap<PathBuf, FileState>,
     initial_positions: HashMap<String, (u64, u64)>, // path -> (position, inode)
-    registry_tx: Option<tokio::sync::mpsc::UnboundedSender<RegistryUpdate>>,
 }
 
 impl LogTailer {
@@ -23,13 +22,19 @@ impl LogTailer {
         Self {
             files: HashMap::new(),
             initial_positions: HashMap::new(),
-            registry_tx: None,
         }
     }
 
-    /// Set the registry channel for sending position updates
-    pub fn set_registry_sender(&mut self, tx: tokio::sync::mpsc::UnboundedSender<RegistryUpdate>) {
-        self.registry_tx = Some(tx);
+    /// Current read position for a file, for persisting to the registry.
+    /// DESIGN CHOICE: The caller decides when to persist (after delivery), not the tailer.
+    pub fn checkpoint(&self, path: &str) -> Option<RegistryUpdate> {
+        self.files
+            .get(&PathBuf::from(path))
+            .map(|state| RegistryUpdate::UpdateFile {
+                path: path.to_string(),
+                position: state.position,
+                inode: state.inode,
+            })
     }
 
     /// Set initial position for a file (loaded from registry)
@@ -108,15 +113,6 @@ impl LogTailer {
 
             // Update position after reading
             state.position = state.reader.stream_position()?;
-
-            // Send update to registry if enabled
-            if let Some(ref tx) = self.registry_tx {
-                let _ = tx.send(RegistryUpdate::UpdateFile {
-                    path: path.to_string(),
-                    position: state.position,
-                    inode: state.inode,
-                });
-            }
         } else {
             // First time seeing this file, open it
             let file = File::open(&path_buf)?;
