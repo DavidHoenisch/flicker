@@ -5,11 +5,19 @@ Listens on port 8000 and prints received log entries to stdout.
 Supports both uncompressed and gzip-compressed payloads.
 """
 
+import argparse
 import json
 import gzip
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import sys
+
+# Set from command-line options in main()
+OUTPUT_PATH = None      # append every received entry here as JSONL (for test assertions)
+FAIL_REMAINING = 0      # answer this many requests with HTTP 500 (simulated outage)
+QUIET = False           # don't print each entry
+LOCK = threading.Lock()
 
 
 class FlickerReceiver(BaseHTTPRequestHandler):
@@ -23,6 +31,13 @@ class FlickerReceiver(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests from Flicker"""
+        global FAIL_REMAINING
+        with LOCK:
+            if FAIL_REMAINING > 0:
+                FAIL_REMAINING -= 1
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                self.send_error(500, "Simulated outage")
+                return
         try:
             # Read content length
             content_length = int(self.headers.get('Content-Length', 0))
@@ -66,16 +81,24 @@ class FlickerReceiver(BaseHTTPRequestHandler):
             # Handle both single entry and batch formats
             entries = data if isinstance(data, list) else [data]
 
-            print(f"\n{'='*80}")
-            print(f"[{timestamp}] Received batch of {len(entries)} log entries:")
-            print(f"{'='*80}")
+            if OUTPUT_PATH:
+                with LOCK, open(OUTPUT_PATH, 'a') as out:
+                    for entry in entries:
+                        out.write(json.dumps(entry) + "\n")
 
-            for i, entry in enumerate(entries, 1):
-                path = entry.get('path', 'unknown')
-                line = entry.get('line', '')
-                print(f"{i:3d}. [{path}] {line}")
+            if QUIET:
+                print(f"[{timestamp}] Received batch of {len(entries)} log entries")
+            else:
+                print(f"\n{'='*80}")
+                print(f"[{timestamp}] Received batch of {len(entries)} log entries:")
+                print(f"{'='*80}")
 
-            print(f"{'='*80}\n")
+                for i, entry in enumerate(entries, 1):
+                    path = entry.get('path', 'unknown')
+                    line = entry.get('line', '')
+                    print(f"{i:3d}. [{path}] {line}")
+
+                print(f"{'='*80}\n")
             sys.stdout.flush()
 
             # Send success response
@@ -113,9 +136,20 @@ class FlickerReceiver(BaseHTTPRequestHandler):
 
 def main():
     """Start the HTTP server"""
-    host = '0.0.0.0'  # Listen on all interfaces
-    port = 8000
+    global OUTPUT_PATH, FAIL_REMAINING, QUIET
+    parser = argparse.ArgumentParser(description="Receive and display Flicker log batches")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--output", help="Append received entries to this file as JSONL")
+    parser.add_argument("--fail-first", type=int, default=0,
+                        help="Respond 500 to the first N requests (simulate an outage)")
+    parser.add_argument("--quiet", action="store_true", help="Only print batch sizes")
+    args = parser.parse_args()
+    OUTPUT_PATH, FAIL_REMAINING, QUIET = args.output, args.fail_first, args.quiet
 
+    host = '0.0.0.0'  # Listen on all interfaces
+    port = args.port
+
+    HTTPServer.allow_reuse_address = True
     server = HTTPServer((host, port), FlickerReceiver)
 
     print("="*80)

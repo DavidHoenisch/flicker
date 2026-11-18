@@ -1,0 +1,5 @@
+# Pinned toolchain so local builds and CI use the same compiler.
+# Keep in sync with rust-version in Cargo.toml and the CI workflows.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]

@@ -169,29 +169,27 @@ pub enum RegistryUpdate {
 /// This task runs independently and batches writes to avoid excessive I/O
 pub async fn registry_writer_task(
     storage: std::sync::Arc<dyn crate::registry_storage::RegistryStorage>,
+    mut registry: Registry,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<RegistryUpdate>,
 ) {
     use tokio::time::{Duration, interval};
 
-    let mut registry = match storage.load().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "Failed to load registry: {}. Starting with empty registry.",
-                e
-            );
-            Registry::new()
-        }
-    };
     let mut dirty = false;
 
-    // Flush registry to storage every 5 seconds (or on shutdown)
+    // Flush registry to storage every 5 seconds, and once more when the channel closes
     let mut flush_interval = interval(Duration::from_secs(5));
 
     loop {
         tokio::select! {
             // Process incoming updates
-            Some(update) = rx.recv() => {
+            update = rx.recv() => {
+                let Some(update) = update else {
+                    // All senders dropped: shutting down, persist final state
+                    if dirty && let Err(e) = storage.save(&registry).await {
+                        eprintln!("Failed to save registry on shutdown: {}", e);
+                    }
+                    return;
+                };
                 match update {
                     RegistryUpdate::UpdateFile { path, position, inode } => {
                         registry.update_file(path, position, inode);

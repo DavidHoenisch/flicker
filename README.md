@@ -79,6 +79,9 @@ logs don't sit in the buffer indefinitely.
 - Exponential backoff prevents overwhelming failed destinations
 - Configurable retry limits and delays
 - Per-source retry queue to isolate failures
+- In-order delivery: new batches wait behind ones still being retried
+- Back-pressure: reading pauses while the retry queue is full instead of dropping data
+- Optional dead-letter file for batches that exhaust their retries
 
 ### 📊 Efficient Tailing
 - Seek-based reading (only reads new content)
@@ -136,7 +139,25 @@ The binary will be at `./target/release/flicker`.
 
 ## Configuration
 
-Flicker uses YAML configuration. Create a `flicker.yaml` file:
+Flicker uses YAML configuration. Create a `flicker.yaml` file.
+
+**Keeping secrets out of the file:** any string value can reference the environment
+or a file instead of holding a secret literally:
+
+- `${VAR}` - environment variable (startup fails if it isn't set)
+- `${VAR:-default}` - environment variable with a fallback
+- `${file:/run/secrets/api_key}` - file contents, trailing newline removed (Docker/Kubernetes secrets)
+- `$${` - a literal `${`
+
+```yaml
+destination:
+  type: "http"
+  endpoint: "https://logs.example.com/ingest"
+  api_key: "${LOG_API_KEY}"
+```
+
+Flicker warns at startup if the config file is world-readable.
+
 
 ```yaml
 # Optional: Global retry configuration (these are the defaults)
@@ -144,7 +165,8 @@ retry:
   max_retries: 5           # Maximum retry attempts before dropping a batch
   initial_delay_ms: 1000   # Initial retry delay (1 second)
   max_delay_ms: 60000      # Maximum retry delay (60 seconds)
-  max_queue_size: 100      # Maximum batches to keep in retry queue
+  max_queue_size: 100      # Queue length at which reading pauses (back-pressure)
+  # dead_letter_path: "/var/lib/flicker/dead-letter.jsonl"  # Optional: keep dropped batches
 
 log_files:
   # High-volume application logs
@@ -164,6 +186,9 @@ log_files:
         password: "your_secret_password"
       # Optional: Enable gzip compression (default: false)
       compression: true
+      # Optional: network timeouts for http/elasticsearch/syslog tcp/s3
+      # timeout_ms: 30000         # Whole-request timeout (default: 30000)
+      # connect_timeout_ms: 10000 # Connect timeout (default: 10000)
       # Optional: mTLS (mutual TLS) configuration
       # tls:
       #   cert_path: "/etc/flicker/certs/client.crt"
@@ -199,6 +224,7 @@ log_files:
       type: "syslog"
       host: "syslog-server.local"
       protocol: "udp"
+      # framing: "newline"  # TCP only: "newline" (embedded newlines escaped) or "octet-counting"
 
   # Application logs with PII masking
   - path: "/var/log/myapp/user-activity.log"
@@ -373,9 +399,10 @@ Global retry configuration for all log sources:
 - **`max_retries`** (integer, default: 5): Maximum number of retry attempts before dropping a batch
 - **`initial_delay_ms`** (integer, default: 1000): Initial delay before first retry in milliseconds
 - **`max_delay_ms`** (integer, default: 60000): Maximum delay between retries in milliseconds (caps exponential growth)
-- **`max_queue_size`** (integer, default: 100): Maximum number of batches to keep in retry queue per source
+- **`max_queue_size`** (integer, default: 100): Number of queued batches per source at which reading pauses until the destination recovers
+- **`dead_letter_path`** (string, optional): JSONL file that batches dropped after `max_retries` are appended to
 
-The retry logic uses exponential backoff: each retry doubles the delay time (1s, 2s, 4s, 8s, 16s...) until it reaches `max_delay_ms`. If a batch exceeds `max_retries`, it will be dropped and logged. If the retry queue reaches `max_queue_size`, the oldest batch will be dropped to make room.
+The retry logic uses exponential backoff: each retry doubles the delay time (1s, 2s, 4s, 8s, 16s...) until it reaches `max_delay_ms`. Batches are retried oldest-first and new batches queue behind them, so delivery stays in order. If a batch exceeds `max_retries`, it is dropped (written to `dead_letter_path` if set) and logged. If the retry queue reaches `max_queue_size`, the source stops reading new lines (its position doesn't advance) until the queue drains, so nothing is dropped for lack of space.
 
 #### `log_files` (array)
 Array of log file configurations. Each entry supports:
@@ -425,10 +452,13 @@ Array of API source configurations for pulling audit logs from REST APIs. Each e
 - **`results_field`** (string, required): JSON path to array of log entries (e.g., "data", "logs", "events")
 - **`timestamp_field`** (string, required): Field in each log entry containing the timestamp
 - **`message_field`** (string, optional): Field containing the log message (if not set, entire entry is serialized as JSON)
+- **`id_field`** (string, optional): Field uniquely identifying an entry; used to de-duplicate entries that share the last-seen timestamp (default: hash of the whole entry)
+- **`on_missing_timestamp`** (string, optional): `"drop"` or `"ship"` entries whose timestamp is missing or unparseable (default: `"drop"`, logged as a warning). Timestamps may be RFC 3339 strings or unix seconds/milliseconds/microseconds, as integers, floats or numeric strings
 
 **Time Filtering:**
 - **`time_filter_param`** (string, optional): Query parameter for filtering by time (e.g., "since", "start_time")
 - **`time_filter_format`** (string, optional): Time format: "unix", "unix_ms", or "rfc3339" (default: "rfc3339")
+- **`max_response_bytes`** (integer, optional, default: 67108864): Largest API response accepted; larger responses fail the poll
 
 **Pagination (optional):**
 - **`pagination`** (object, optional): Pagination configuration
@@ -457,16 +487,16 @@ Each rule in the `rules` array is an object with the following fields:
 
 - **`type`** (string, required): The type of masking rule. One of:
   - `"email"` - Matches email addresses (e.g., `user@example.com`)
-  - `"credit_card"` - Matches credit card numbers (e.g., `1234-5678-9012-3456`)
+  - `"credit_card"` - Matches credit card numbers (e.g., `4111-1111-1111-1111`); requires a valid Luhn checksum and issuer prefix, so timestamps and IDs aren't masked
   - `"ssn"` - Matches Social Security Numbers (e.g., `123-45-6789`)
-  - `"phone"` - Matches phone numbers (e.g., `(555) 123-4567`, `+1-555-123-4567`)
+  - `"phone"` - Matches phone numbers with separators or a `+` prefix (e.g., `(555) 123-4567`, `+1-555-123-4567`, `+442071234567`); bare digit runs are not matched
   - `"ip_address"` - Matches IPv4 and IPv6 addresses (e.g., `192.168.1.1`, `2001:0db8::1`)
-  - `"api_key"` - Matches common API key patterns (e.g., `api-key: abc123xyz456`)
+  - `"api_key"` - Matches secrets assigned to keys like `api_key`, `token`, `secret`, `password` (case-insensitive, including prefixed names like `DB_PASSWORD`), `Bearer`/`Basic` authorization values, and AWS access key IDs. Only the value is masked (`password=[API_KEY]`)
   - `"custom"` - Uses a custom regex pattern (requires `pattern` field)
 
 - **`name`** (string, required for `type: "custom"`, optional otherwise): A descriptive name for custom rules. Used in logs and debugging.
 
-- **`pattern`** (string, required for `type: "custom"`): A valid regex pattern for matching sensitive data. Example: `"EMP-[0-9]{6}"` to match employee IDs.
+- **`pattern`** (string, required for `type: "custom"`): A valid regex pattern for matching sensitive data. Example: `"EMP-[0-9]{6}"` to match employee IDs. If the pattern has a named group `(?P<mask>...)`, only that group is masked (e.g. `"session=(?P<mask>[a-f0-9]{32})"`).
 
 - **`action`** (string, default: "redact"): The masking action to apply. One of:
   - `"redact"` - Replace the entire match with the replacement text (default: `[REDACTED]`)
@@ -542,15 +572,16 @@ Destination configuration for log files, Docker containers, and API sources:
 
 - **`type`** (string, required): Destination type: "http", "syslog", "elasticsearch", "file", or "s3"
 - **`endpoint`** (string, required for http): The HTTP endpoint to send logs to
-- **`require_auth`** (boolean, optional for http): If true, requires either `api_key` or `basic` to be set
-- **`api_key`** (string, optional for http): A bearer token to include in the `Authorization` header
-- **`basic`** (object, optional for http): An object with `username` and `password` for basic authentication
+- **`require_auth`** (boolean, optional for http/elasticsearch): If true, requires either `api_key` or `basic` to be set
+- **`api_key`** (string, optional for http/elasticsearch): A bearer token to include in the `Authorization` header
+- **`basic`** (object, optional for http/elasticsearch): An object with `username` and `password` for basic authentication
 - **`compression`** (boolean, optional for http, default: false): Enable gzip compression for HTTP payloads
-- **`tls`** (object, optional for http): TLS/mTLS configuration for client certificate authentication
+- **`tls`** (object, optional for http/elasticsearch): TLS/mTLS configuration for client certificate authentication
   - **`cert_path`** (string, required): Path to client certificate file in PEM format
   - **`key_path`** (string, required): Path to client private key file in PEM format
   - **`ca_cert_path`** (string, optional): Path to custom CA certificate for server verification
   - **`accept_invalid_certs`** (boolean, optional, default: false): Accept invalid/self-signed server certificates (not recommended for production)
+- **`timeout_ms`** / **`connect_timeout_ms`** (integer, optional for http/elasticsearch/syslog tcp/s3, defaults 30000/10000): Request and connect timeouts
 - **Other fields** (various): Destination-specific fields (see examples/flicker-example.yaml)
 - **`bucket`** (string, required for s3): S3 bucket name
 - **`prefix`** (string, optional for s3): S3 key prefix (e.g., "logs/myapp/")
@@ -566,6 +597,9 @@ Destination configuration for log files, Docker containers, and API sources:
 # Specify custom config
 ./flicker --config /path/to/config.yaml
 ./flicker -c /path/to/config.yaml
+
+# Skip sources that fail to set up instead of exiting (default: exit on any error)
+./flicker --continue-on-error
 
 # Show help
 ./flicker --help

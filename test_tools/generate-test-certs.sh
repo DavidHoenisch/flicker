@@ -1,5 +1,7 @@
 #!/bin/bash
 # Generate test certificates for mTLS testing
+# Leaf certs carry extendedKeyUsage (serverAuth/clientAuth): macOS's TLS stack,
+# which flicker uses via native-tls, rejects server certs without it.
 # This creates a CA, server cert, and client cert for testing purposes only
 
 set -e
@@ -36,7 +38,7 @@ echo "[5/6] Signing server certificate with CA..."
 openssl x509 -req -days 365 -in "$CERT_DIR/server.csr" \
     -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" \
     -CAcreateserial -out "$CERT_DIR/server.crt" \
-    -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1") \
+    -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth") \
     2>/dev/null
 
 # 3. Generate client private key and certificate
@@ -53,6 +55,7 @@ echo "[8/8] Signing client certificate with CA..."
 openssl x509 -req -days 365 -in "$CERT_DIR/client.csr" \
     -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" \
     -CAcreateserial -out "$CERT_DIR/client.crt" \
+    -extfile <(printf "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth") \
     2>/dev/null
 
 # Clean up CSR files

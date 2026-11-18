@@ -105,6 +105,17 @@ pub struct CustomRule {
     pub partial_mask: Option<PartialMaskConfig>,
 }
 
+/// Extra check on a regex match; the match is left untouched if it returns false
+type Validator = fn(&str) -> bool;
+
+/// Built-in rule: (name, config, default replacement, patterns with optional validators)
+type BuiltinRule<'a> = (
+    &'a str,
+    &'a Option<RuleConfig>,
+    &'a str,
+    &'a [(&'a str, Option<Validator>)],
+);
+
 /// Compiled rule ready for efficient application
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -112,6 +123,7 @@ struct CompiledRule {
     name: String,
     regex: Regex,
     action: MaskingAction,
+    validate: Option<Validator>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,76 +149,60 @@ impl MaskingEngine {
         let mut rules = Vec::new();
 
         // Compile built-in rules
-        if let Some(ref rule_config) = config.rules.email
-            && rule_config.enabled
-        {
-            let regex = Regex::new(EMAIL_PATTERN)
-                .map_err(|e| anyhow::anyhow!("Invalid email regex: {}", e))?;
-            rules.push(CompiledRule {
-                name: "email".to_string(),
-                regex,
-                action: Self::action_from_config(rule_config, "[EMAIL]"),
-            });
-        }
-
-        if let Some(ref rule_config) = config.rules.credit_card
-            && rule_config.enabled
-        {
-            let regex = Regex::new(CREDIT_CARD_PATTERN)
-                .map_err(|e| anyhow::anyhow!("Invalid credit_card regex: {}", e))?;
-            rules.push(CompiledRule {
-                name: "credit_card".to_string(),
-                regex,
-                action: Self::action_from_config(rule_config, "[CREDIT_CARD]"),
-            });
-        }
-
-        if let Some(ref rule_config) = config.rules.ssn
-            && rule_config.enabled
-        {
-            let regex =
-                Regex::new(SSN_PATTERN).map_err(|e| anyhow::anyhow!("Invalid ssn regex: {}", e))?;
-            rules.push(CompiledRule {
-                name: "ssn".to_string(),
-                regex,
-                action: Self::action_from_config(rule_config, "[SSN]"),
-            });
-        }
-
-        if let Some(ref rule_config) = config.rules.phone
-            && rule_config.enabled
-        {
-            let regex = Regex::new(PHONE_PATTERN)
-                .map_err(|e| anyhow::anyhow!("Invalid phone regex: {}", e))?;
-            rules.push(CompiledRule {
-                name: "phone".to_string(),
-                regex,
-                action: Self::action_from_config(rule_config, "[PHONE]"),
-            });
-        }
-
-        if let Some(ref rule_config) = config.rules.ip_address
-            && rule_config.enabled
-        {
-            let regex = Regex::new(IP_ADDRESS_PATTERN)
-                .map_err(|e| anyhow::anyhow!("Invalid ip_address regex: {}", e))?;
-            rules.push(CompiledRule {
-                name: "ip_address".to_string(),
-                regex,
-                action: Self::action_from_config(rule_config, "[IP]"),
-            });
-        }
-
-        if let Some(ref rule_config) = config.rules.api_key
-            && rule_config.enabled
-        {
-            let regex = Regex::new(API_KEY_PATTERN)
-                .map_err(|e| anyhow::anyhow!("Invalid api_key regex: {}", e))?;
-            rules.push(CompiledRule {
-                name: "api_key".to_string(),
-                regex,
-                action: Self::action_from_config(rule_config, "[API_KEY]"),
-            });
+        let builtins: [BuiltinRule; 6] = [
+            (
+                "email",
+                &config.rules.email,
+                "[EMAIL]",
+                &[(EMAIL_PATTERN, None)],
+            ),
+            (
+                "credit_card",
+                &config.rules.credit_card,
+                "[CREDIT_CARD]",
+                &[(CREDIT_CARD_PATTERN, Some(is_plausible_card_number))],
+            ),
+            ("ssn", &config.rules.ssn, "[SSN]", &[(SSN_PATTERN, None)]),
+            (
+                "phone",
+                &config.rules.phone,
+                "[PHONE]",
+                &[(PHONE_PATTERN, None)],
+            ),
+            (
+                "ip_address",
+                &config.rules.ip_address,
+                "[IP]",
+                &[
+                    (IPV4_PATTERN, None),
+                    (IPV6_CANDIDATE_PATTERN, Some(is_ipv6)),
+                ],
+            ),
+            (
+                "api_key",
+                &config.rules.api_key,
+                "[API_KEY]",
+                &[
+                    (SECRET_ASSIGNMENT_PATTERN, None),
+                    (AUTH_HEADER_PATTERN, None),
+                    (AWS_ACCESS_KEY_PATTERN, None),
+                ],
+            ),
+        ];
+        for (name, rule_config, default_replacement, patterns) in builtins {
+            let Some(rule_config) = rule_config.as_ref().filter(|r| r.enabled) else {
+                continue;
+            };
+            for (pattern, validate) in patterns {
+                let regex = Regex::new(pattern)
+                    .map_err(|e| anyhow::anyhow!("Invalid {} regex: {}", name, e))?;
+                rules.push(CompiledRule {
+                    name: name.to_string(),
+                    regex,
+                    action: Self::action_from_config(rule_config, default_replacement),
+                    validate: *validate,
+                });
+            }
         }
 
         // Compile custom rules
@@ -217,6 +213,7 @@ impl MaskingEngine {
                 name: custom.name.clone(),
                 regex,
                 action: Self::action_from_custom(custom),
+                validate: None,
             });
         }
 
@@ -268,7 +265,10 @@ impl MaskingEngine {
     }
 
     /// Apply all enabled masking rules to a log line
-    /// Rules are applied sequentially in order defined
+    /// Rules are applied sequentially in order defined.
+    ///
+    /// DESIGN CHOICE: If a pattern has a `(?P<mask>...)` group, only that part is
+    /// masked (e.g. `password=[API_KEY]` keeps the key name for context).
     pub fn apply(&self, line: &str) -> String {
         let mut result = line.to_string();
 
@@ -276,14 +276,27 @@ impl MaskingEngine {
             result = rule
                 .regex
                 .replace_all(&result, |caps: &regex::Captures| {
-                    let matched = caps.get(0).unwrap().as_str();
-                    match &rule.action {
+                    let whole = caps.get(0).unwrap();
+                    let target = caps.name("mask").unwrap_or(whole);
+                    if let Some(validate) = rule.validate
+                        && !validate(target.as_str())
+                    {
+                        return whole.as_str().to_string();
+                    }
+                    let masked = match &rule.action {
                         MaskingAction::Redact(replacement) => replacement.clone(),
                         MaskingAction::Partial {
                             keep_last,
                             mask_char,
-                        } => Self::apply_partial_mask(matched, *keep_last, *mask_char),
-                    }
+                        } => Self::apply_partial_mask(target.as_str(), *keep_last, *mask_char),
+                    };
+                    let text = whole.as_str();
+                    format!(
+                        "{}{}{}",
+                        &text[..target.start() - whole.start()],
+                        masked,
+                        &text[target.end() - whole.start()..]
+                    )
                 })
                 .to_string();
         }
@@ -292,14 +305,20 @@ impl MaskingEngine {
     }
 
     fn apply_partial_mask(text: &str, keep_last: usize, mask_char: char) -> String {
-        let len = text.len();
+        // DESIGN CHOICE: Count chars, not bytes, so slicing never splits a
+        // multi-byte UTF-8 character (which would panic).
+        let len = text.chars().count();
         if len <= keep_last {
             return mask_char.to_string().repeat(len);
         }
 
         let masked_len = len - keep_last;
         let mask_str: String = mask_char.to_string().repeat(masked_len);
-        let visible_part = &text[masked_len..];
+        let visible_start = text
+            .char_indices()
+            .nth(masked_len)
+            .map_or(text.len(), |(i, _)| i);
+        let visible_part = &text[visible_start..];
 
         format!("{}{}", mask_str, visible_part)
     }
@@ -315,22 +334,63 @@ impl MaskingEngine {
 // Email pattern - matches common email formats
 const EMAIL_PATTERN: &str = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}";
 
-// Credit card pattern - matches 13-16 digit numbers with optional spaces/dashes
-const CREDIT_CARD_PATTERN: &str = r"\b(?:\d[ -]*?){13,16}\b";
+// Credit card pattern - 13-19 contiguous digits, or 4-4-4-4 / Amex 4-6-5 groups
+// separated by spaces or dashes. Matches are confirmed by is_plausible_card_number.
+const CREDIT_CARD_PATTERN: &str =
+    r"\b(?:\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4}|\d{4}[ -]\d{6}[ -]\d{5}|\d{13,19})\b";
 
 // SSN pattern - matches XXX-XX-XXXX format
 const SSN_PATTERN: &str = r"\b\d{3}-\d{2}-\d{4}\b";
 
-// Phone pattern - matches various international formats
-const PHONE_PATTERN: &str = r"\b(?:\+?1[-.]?)?\s*\(?\d{3}\)?[-.]?\s*\d{3}[-.]?\s*\d{4}\b";
+// Phone pattern - requires separators or a + prefix, so bare digit runs like
+// epoch timestamps aren't matched. E.g. 555-123-4567, (555) 123-4567,
+// +1 555 123 4567, +442071234567
+const PHONE_PATTERN: &str =
+    r"(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)\s?|\b\d{3}[\s.-])\d{3}[\s.-]\d{4}\b|\+\d{8,15}\b";
 
-// IP address pattern - matches IPv4 addresses
-const IP_ADDRESS_PATTERN: &str = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b";
+// IPv4 address
+const IPV4_PATTERN: &str = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b";
 
-// API key pattern - matches common API key formats (Bearer tokens, alphanumeric keys)
-// Note: Using ## as raw string delimiter to avoid issues with ] in pattern
-const API_KEY_PATTERN: &str =
-    r##"\b(?:api[_-]?key|apikey|token)[\s]*[:=][\s]*['\"]?([a-zA-Z0-9_-]{16,})['\"]?\b"##;
+// IPv6 candidate (hex groups and colons); confirmed by is_ipv6 so times and
+// MAC addresses aren't masked
+const IPV6_CANDIDATE_PATTERN: &str = r"(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}";
+
+// Secrets assigned to a key: api_key=..., "password": "...", DB_PASSWORD=..., token: ...
+// Case-insensitive; the key may have a prefix (db_password, github_token).
+const SECRET_ASSIGNMENT_PATTERN: &str = r#"(?i)\b[a-z0-9_.-]*(?:api[_-]?key|apikey|access[_-]?key|secret|token|password|passwd|pwd|credentials?)["']?\s*[:=]\s*["']?(?P<mask>[^\s"',;&]+)"#;
+
+// Authorization header values: Bearer <token>, Basic <base64>
+const AUTH_HEADER_PATTERN: &str = r"(?i)\b(?:bearer|basic)\s+(?P<mask>[A-Za-z0-9._~+/-]{8,}=*)";
+
+// AWS access key IDs
+const AWS_ACCESS_KEY_PATTERN: &str = r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b";
+
+/// Card numbers: 13-19 digits, a real issuer prefix (2-6) and a valid Luhn checksum.
+/// Rejects epoch-millisecond/microsecond timestamps (leading 1) and most other IDs.
+fn is_plausible_card_number(text: &str) -> bool {
+    let digits: Vec<u32> = text.chars().filter_map(|c| c.to_digit(10)).collect();
+    if !(13..=19).contains(&digits.len()) || !(2..=6).contains(&digits[0]) {
+        return false;
+    }
+    let sum: u32 = digits
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(i, &d)| {
+            if i % 2 == 1 {
+                let doubled = d * 2;
+                if doubled > 9 { doubled - 9 } else { doubled }
+            } else {
+                d
+            }
+        })
+        .sum();
+    sum.is_multiple_of(10)
+}
+
+fn is_ipv6(text: &str) -> bool {
+    text.parse::<std::net::Ipv6Addr>().is_ok()
+}
 
 #[cfg(test)]
 mod tests {
@@ -627,6 +687,17 @@ rules:
     }
 
     #[test]
+    fn test_partial_masking_multibyte_utf8() {
+        assert_eq!(MaskingEngine::apply_partial_mask("José", 1, '*'), "***é");
+        assert_eq!(
+            MaskingEngine::apply_partial_mask("日本語テキスト", 2, '#'),
+            "#####スト"
+        );
+        assert_eq!(MaskingEngine::apply_partial_mask("é", 1, '*'), "*");
+        assert_eq!(MaskingEngine::apply_partial_mask("ab", 0, '*'), "**");
+    }
+
+    #[test]
     fn test_partial_masking_short_string() {
         let config = MaskingConfig {
             enabled: true,
@@ -757,7 +828,7 @@ log_files:
             ),
             (
                 "New registration: +1 555-789-0123",
-                "New registration: +[PHONE_REDACTED]", // Phone regex doesn't match +1 prefix
+                "New registration: [PHONE_REDACTED]",
             ),
             (
                 "Authentication failed for user at 001-23-4567",
@@ -769,5 +840,131 @@ log_files:
             let result = engine.apply(input);
             assert_eq!(result, expected, "Failed for input: {}", input);
         }
+    }
+
+    fn engine_with(rules: MaskingRules) -> MaskingEngine {
+        let enabled = || {
+            Some(RuleConfig {
+                enabled: true,
+                ..Default::default()
+            })
+        };
+        let rules = MaskingRules {
+            email: rules.email.and_then(|_| enabled()),
+            credit_card: rules.credit_card.and_then(|_| enabled()),
+            ssn: rules.ssn.and_then(|_| enabled()),
+            phone: rules.phone.and_then(|_| enabled()),
+            ip_address: rules.ip_address.and_then(|_| enabled()),
+            api_key: rules.api_key.and_then(|_| enabled()),
+            custom: rules.custom,
+        };
+        MaskingEngine::new(&MaskingConfig {
+            enabled: true,
+            rules,
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn on() -> Option<RuleConfig> {
+        Some(RuleConfig::default())
+    }
+
+    #[test]
+    fn test_timestamps_not_masked() {
+        let engine = engine_with(MaskingRules {
+            credit_card: on(),
+            phone: on(),
+            ..Default::default()
+        });
+        for line in [
+            "ts=1731801600123",
+            "epoch=1731801600",
+            "us=1731801600123456",
+            "order=1234567890123",
+            "at 2024-11-17 12:30:45",
+        ] {
+            assert_eq!(engine.apply(line), line);
+        }
+    }
+
+    #[test]
+    fn test_credit_card_luhn_and_formats() {
+        let engine = engine_with(MaskingRules {
+            credit_card: on(),
+            ..Default::default()
+        });
+        assert_eq!(
+            engine.apply("card 4111-1111-1111-1111"),
+            "card [CREDIT_CARD]"
+        );
+        assert_eq!(engine.apply("amex 3782 822463 10005"), "amex [CREDIT_CARD]");
+        assert_eq!(
+            engine.apply("card 4111 1111 1111 1111 12/25"),
+            "card [CREDIT_CARD] 12/25"
+        );
+        // Fails Luhn
+        assert_eq!(
+            engine.apply("card 4111111111111112"),
+            "card 4111111111111112"
+        );
+    }
+
+    #[test]
+    fn test_phone_formats() {
+        let engine = engine_with(MaskingRules {
+            phone: on(),
+            ..Default::default()
+        });
+        assert_eq!(engine.apply("call 555.123.4567"), "call [PHONE]");
+        assert_eq!(engine.apply("call +442071234567"), "call [PHONE]");
+        assert_eq!(engine.apply("call +1 (555) 123-4567"), "call [PHONE]");
+        assert_eq!(engine.apply("SSN 123-45-6789"), "SSN 123-45-6789");
+    }
+
+    #[test]
+    fn test_api_key_variants() {
+        let engine = engine_with(MaskingRules {
+            api_key: on(),
+            ..Default::default()
+        });
+        let cases = [
+            ("API_KEY=abcdef123456", "API_KEY=[API_KEY]"),
+            ("password=hunter2 user=bob", "password=[API_KEY] user=bob"),
+            (r#"{"secret": "s3cr3t"}"#, r#"{"secret": "[API_KEY]"}"#),
+            ("DB_PASSWORD: pa55", "DB_PASSWORD: [API_KEY]"),
+            (
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def",
+                "Authorization: Bearer [API_KEY]",
+            ),
+            (
+                "Authorization: Basic dXNlcjpwYXNz",
+                "Authorization: Basic [API_KEY]",
+            ),
+            ("key AKIAIOSFODNN7EXAMPLE used", "key [API_KEY] used"),
+            ("max_tokens_used 5", "max_tokens_used 5"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(engine.apply(input), expected, "input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_ipv6_masked_but_not_times_or_macs() {
+        let engine = engine_with(MaskingRules {
+            ip_address: on(),
+            ..Default::default()
+        });
+        assert_eq!(
+            engine.apply("from 2001:db8::8a2e:370:7334 ok"),
+            "from [IP] ok"
+        );
+        assert_eq!(engine.apply("from ::1 ok"), "from [IP] ok");
+        assert_eq!(engine.apply("at 12:30:45"), "at 12:30:45");
+        assert_eq!(
+            engine.apply("mac aa:bb:cc:dd:ee:ff"),
+            "mac aa:bb:cc:dd:ee:ff"
+        );
+        assert_eq!(engine.apply("from 10.0.0.1"), "from [IP]");
     }
 }

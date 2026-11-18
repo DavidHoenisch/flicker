@@ -3,15 +3,13 @@
 // DESIGN: Generic HTTP destination that works with Vector, custom
 // HTTP endpoints, or any service accepting JSON log arrays.
 
-use super::{Destination, LogEntry};
+use super::{Destination, LogEntry, build_http_client};
 use crate::config::DestinationConfig;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use base64::prelude::*;
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use reqwest::header::{AUTHORIZATION, CONTENT_ENCODING, HeaderMap, HeaderValue};
-use std::fs;
+use reqwest::header::CONTENT_ENCODING;
 use std::io::Write;
 
 pub struct HttpDestination {
@@ -27,64 +25,7 @@ impl HttpDestination {
             .clone()
             .context("HTTP destination requires an endpoint")?;
 
-        let require_auth = config.require_auth.unwrap_or(false);
-        if require_auth && !config.has_auth() {
-            anyhow::bail!(
-                "HTTP destination requires auth, but no API key or basic auth was provided"
-            );
-        }
-
-        let mut headers = HeaderMap::new();
-        if let Some(api_key) = &config.api_key {
-            let mut auth_value = HeaderValue::from_str(&format!("Bearer {}", api_key))?;
-            auth_value.set_sensitive(true);
-            headers.insert(AUTHORIZATION, auth_value);
-        } else if let Some(basic) = &config.basic {
-            let auth_string = format!("{}:{}", basic.username, basic.password);
-            let mut auth_value =
-                HeaderValue::from_str(&format!("Basic {}", BASE64_STANDARD.encode(auth_string)))?;
-            auth_value.set_sensitive(true);
-            headers.insert(AUTHORIZATION, auth_value);
-        }
-
-        let mut client_builder = reqwest::Client::builder().default_headers(headers);
-
-        // Configure TLS/mTLS if specified
-        if let Some(tls_config) = &config.tls {
-            // Read client certificate and key
-            let cert_pem = fs::read(&tls_config.cert_path).with_context(|| {
-                format!("Failed to read certificate file: {}", tls_config.cert_path)
-            })?;
-            let key_pem = fs::read(&tls_config.key_path)
-                .with_context(|| format!("Failed to read key file: {}", tls_config.key_path))?;
-
-            // Create identity for client certificate authentication
-            // native-tls requires separate cert and key PEM files
-            let identity = reqwest::Identity::from_pkcs8_pem(&cert_pem, &key_pem)
-                .context("Failed to create identity from certificate and key")?;
-            client_builder = client_builder.identity(identity);
-
-            // Add custom CA certificate if provided
-            if let Some(ca_path) = &tls_config.ca_cert_path {
-                let ca_cert = fs::read(ca_path)
-                    .with_context(|| format!("Failed to read CA certificate file: {}", ca_path))?;
-                let cert = reqwest::Certificate::from_pem(&ca_cert)
-                    .context("Failed to parse CA certificate")?;
-                client_builder = client_builder.add_root_certificate(cert);
-            }
-
-            // Optionally disable certificate verification (dangerous, but sometimes needed for testing)
-            if tls_config.accept_invalid_certs.unwrap_or(false) {
-                client_builder = client_builder.danger_accept_invalid_certs(true);
-            }
-
-            println!(
-                "[HTTP] Configured mTLS with client certificate from {}",
-                tls_config.cert_path
-            );
-        }
-
-        let client = client_builder.build()?;
+        let client = build_http_client(config, "HTTP")?;
         let compression = config.compression.unwrap_or(false);
 
         Ok(Self {
@@ -167,5 +108,38 @@ impl Destination for HttpDestination {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn test_http_destination_times_out_on_hung_endpoint() {
+        // Accept connections but never respond
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let config: DestinationConfig = serde_yaml::from_str(&format!(
+            "type: http\nendpoint: http://{}/\ntimeout_ms: 200\n",
+            addr
+        ))
+        .unwrap();
+        let dest = HttpDestination::new(&config).unwrap();
+
+        let start = Instant::now();
+        let result = dest
+            .send_batch(vec![LogEntry::new("/test.log", "hello")])
+            .await;
+        assert!(result.is_err());
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 }

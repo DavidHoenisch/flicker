@@ -167,13 +167,13 @@ def event_generator(server_address):
         event_num += 1
 
 
-def run_server(port=9000):
+def run_server(port=9000, generate=True, initial=True):
     """Run the mock API server"""
     server_address = ('', port)
 
     # Initialize with some events
     print(f"[Server] Generating initial events...")
-    MockAPIServer.events = generate_initial_events(50)
+    MockAPIServer.events = generate_initial_events(50) if initial else []
     MockAPIServer.event_counter = 50
 
     print(f"[Server] Starting mock API server on port {port}...")
@@ -183,10 +183,12 @@ def run_server(port=9000):
     print(f"\n[Server] Press Ctrl+C to stop\n")
 
     # Start event generator thread
-    generator_thread = threading.Thread(target=event_generator, args=(server_address,), daemon=True)
-    generator_thread.start()
+    if generate:
+        generator_thread = threading.Thread(target=event_generator, args=(server_address,), daemon=True)
+        generator_thread.start()
 
     # Start server
+    HTTPServer.allow_reuse_address = True
     httpd = HTTPServer(server_address, MockAPIServer)
 
     try:
@@ -201,6 +203,9 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Mock vendor API server for testing')
     parser.add_argument('--port', type=int, default=9000, help='Port to listen on (default: 9000)')
+    parser.add_argument('--no-generator', action='store_true',
+                        help="Don't add periodic events (deterministic tests add events via POST)")
+    parser.add_argument('--no-initial', action='store_true', help="Start with no events")
     args = parser.parse_args()
 
-    run_server(args.port)
+    run_server(args.port, generate=not args.no_generator, initial=not args.no_initial)

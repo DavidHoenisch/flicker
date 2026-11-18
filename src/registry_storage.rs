@@ -1,7 +1,9 @@
 use crate::registry::Registry;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// Trait for different registry storage backends
 #[async_trait]
@@ -16,51 +18,114 @@ pub trait RegistryStorage: Send + Sync {
 /// Filesystem-based registry storage
 pub struct FileSystemStorage {
     path: PathBuf,
+    /// Held for the life of the process so two instances can't share a registry
+    _lock: File,
 }
 
 impl FileSystemStorage {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+    /// Open the registry at `path`, taking an exclusive lock on `<path>.lock`.
+    /// DESIGN CHOICE: An OS file lock (not a marker file) is released automatically
+    /// if the process dies, so a crash never leaves a stale lock behind.
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let lock_path = sibling_path(&path, ".lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("Failed to open registry lock {:?}", lock_path))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(anyhow!(
+                    "Registry {:?} is in use by another flicker instance (lock {:?})",
+                    path,
+                    lock_path
+                ));
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(anyhow!("Failed to lock registry {:?}: {}", lock_path, e));
+            }
+        }
+        Ok(Self { path, _lock: lock })
     }
+}
+
+/// `<path><suffix>`, e.g. registry.json -> registry.json.lock
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 #[async_trait]
 impl RegistryStorage for FileSystemStorage {
     async fn load(&self) -> Result<Registry> {
-        // Use tokio's async file operations
-        match tokio::fs::read_to_string(&self.path).await {
-            Ok(contents) => match serde_json::from_str(&contents) {
-                Ok(registry) => {
-                    eprintln!("Loaded registry from {:?}", self.path);
-                    Ok(registry)
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse registry at {:?}: {}. Starting with empty registry.",
-                        self.path, e
-                    );
-                    Ok(Registry::new())
-                }
-            },
-            Err(_) => {
+        let contents = match tokio::fs::read_to_string(&self.path).await {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 eprintln!("No existing registry at {:?}, starting fresh", self.path);
-                Ok(Registry::new())
+                return Ok(Registry::new());
+            }
+            Err(e) => return Err(anyhow!("Failed to read registry {:?}: {}", self.path, e)),
+        };
+
+        match serde_json::from_str(&contents) {
+            Ok(registry) => {
+                eprintln!("Loaded registry from {:?}", self.path);
+                Ok(registry)
+            }
+            Err(e) => {
+                // DESIGN CHOICE: Don't silently start empty (sources would skip to
+                // the end of their files) or overwrite the evidence. Move the file
+                // aside and stop; restarting then begins fresh, deliberately.
+                let aside = sibling_path(
+                    &self.path,
+                    &format!(".corrupt-{}", chrono::Utc::now().timestamp()),
+                );
+                let moved = tokio::fs::rename(&self.path, &aside).await;
+                Err(anyhow!(
+                    "Registry {:?} is corrupt ({}). {}. Restart to begin with an empty registry.",
+                    self.path,
+                    e,
+                    match moved {
+                        Ok(()) => format!("Moved it to {:?}", aside),
+                        Err(re) => format!("Could not move it aside: {}", re),
+                    }
+                ))
             }
         }
     }
 
     async fn save(&self, registry: &Registry) -> Result<()> {
         let json = serde_json::to_string_pretty(registry)?;
-
-        // Write to temp file first
-        let temp_path = self.path.with_extension("tmp");
-        tokio::fs::write(&temp_path, json).await?;
-
-        // Atomic rename
-        tokio::fs::rename(&temp_path, &self.path).await?;
-
-        Ok(())
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || write_durably(&path, json.as_bytes())).await?
     }
+}
+
+/// Atomically replace `path` with `contents`, surviving power loss.
+fn write_durably(path: &Path, contents: &[u8]) -> Result<()> {
+    // Per-process temp name, so concurrent writers can't clobber each other's temp file
+    let temp_path = sibling_path(path, &format!(".tmp.{}", std::process::id()));
+    {
+        let mut file = File::create(&temp_path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp_path, path)?;
+
+    // Persist the rename itself (directory entry). Not possible on Windows.
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// S3-based registry storage
@@ -169,28 +234,26 @@ impl RegistryStorage for S3Storage {
                         eprintln!("Loaded registry from s3://{}/{}", self.bucket, self.key);
                         Ok(registry)
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to parse registry from s3://{}/{}: {}. Starting with empty registry.",
-                            self.bucket, self.key, e
-                        );
-                        Ok(Registry::new())
-                    }
+                    // Fail rather than start empty and overwrite it on the next save
+                    Err(e) => Err(anyhow!(
+                        "Registry s3://{}/{} is corrupt ({}). Fix or delete it and restart.",
+                        self.bucket,
+                        self.key,
+                        e
+                    )),
                 }
             }
-            Err(e) => {
-                // Check if it's a 404 (object doesn't exist)
-                let err_msg = format!("{:?}", e);
-                if err_msg.contains("NoSuchKey") || err_msg.contains("404") {
-                    eprintln!(
-                        "No existing registry at s3://{}/{}, starting fresh",
-                        self.bucket, self.key
-                    );
-                    Ok(Registry::new())
-                } else {
-                    Err(anyhow!("Failed to load registry from S3: {}", e))
-                }
+            Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
+                eprintln!(
+                    "No existing registry at s3://{}/{}, starting fresh",
+                    self.bucket, self.key
+                );
+                Ok(Registry::new())
             }
+            Err(e) => Err(anyhow!(
+                "Failed to load registry from S3: {}",
+                aws_sdk_s3::error::DisplayErrorContext(e)
+            )),
         }
     }
 
@@ -258,5 +321,62 @@ mod tests {
     fn test_parse_s3_url_invalid_empty_key() {
         let result = S3Storage::parse_s3_url("s3://bucket/");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fs_storage_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let storage = FileSystemStorage::new(&path).unwrap();
+
+        let mut registry = storage.load().await.unwrap();
+        assert!(registry.files.is_empty());
+        registry.update_file("/var/log/a.log".to_string(), 42, 7);
+        storage.save(&registry).await.unwrap();
+
+        let loaded = storage.load().await.unwrap();
+        assert_eq!(
+            loaded.get_file_position("/var/log/a.log").unwrap().position,
+            42
+        );
+        // No temp files left behind
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.iter().all(|n| !n.contains(".tmp")), "{:?}", names);
+    }
+
+    #[tokio::test]
+    async fn test_fs_storage_corrupt_registry_fails_and_is_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let storage = FileSystemStorage::new(&path).unwrap();
+
+        let err = storage.load().await.unwrap_err().to_string();
+        assert!(err.contains("corrupt"), "{}", err);
+        assert!(!path.exists());
+        let moved = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .find(|n| n.starts_with("registry.json.corrupt-"))
+            .expect("corrupt registry moved aside");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(moved)).unwrap(),
+            "{ not json"
+        );
+    }
+
+    #[test]
+    fn test_fs_storage_lock_prevents_second_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let first = FileSystemStorage::new(&path).unwrap();
+        let err = FileSystemStorage::new(&path).err().unwrap().to_string();
+        assert!(err.contains("another flicker instance"), "{}", err);
+
+        drop(first);
+        assert!(FileSystemStorage::new(&path).is_ok());
     }
 }

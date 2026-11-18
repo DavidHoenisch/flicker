@@ -1,6 +1,7 @@
 use crate::masking::MaskingConfig;
 use serde::Deserialize;
 use std::fs;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RetryConfigOptions {
@@ -15,6 +16,10 @@ pub struct RetryConfigOptions {
 
     #[serde(default = "default_max_queue_size")]
     pub max_queue_size: usize,
+
+    /// Optional JSONL file for batches dropped after max_retries
+    #[serde(default)]
+    pub dead_letter_path: Option<String>,
 }
 
 impl Default for RetryConfigOptions {
@@ -24,6 +29,7 @@ impl Default for RetryConfigOptions {
             initial_delay_ms: default_initial_delay_ms(),
             max_delay_ms: default_max_delay_ms(),
             max_queue_size: default_max_queue_size(),
+            dead_letter_path: None,
         }
     }
 }
@@ -35,6 +41,7 @@ impl RetryConfigOptions {
             initial_delay_ms: self.initial_delay_ms,
             max_delay_ms: self.max_delay_ms,
             max_queue_size: self.max_queue_size,
+            dead_letter_path: self.dead_letter_path.clone(),
         }
     }
 }
@@ -145,6 +152,9 @@ pub struct ApiSourceConfig {
     pub results_field: String, // JSON path to array of log entries (e.g., "data", "logs", "events")
     pub timestamp_field: String, // Field in each log entry containing timestamp
     pub message_field: Option<String>, // Field containing the log message (if None, serialize entire object)
+    pub id_field: Option<String>, // Unique entry id, used to de-duplicate entries sharing a timestamp (default: hash of whole entry)
+    #[serde(default)]
+    pub on_missing_timestamp: MissingTimestampAction, // What to do with entries lacking a parseable timestamp
 
     // Pagination
     pub pagination: Option<PaginationConfig>,
@@ -154,6 +164,25 @@ pub struct ApiSourceConfig {
     pub time_filter_param: Option<String>, // Query param for filtering by time (e.g., "since", "start_time")
     #[serde(default)]
     pub time_filter_format: Option<String>, // Time format: "unix", "unix_ms", "rfc3339" (default: "rfc3339")
+
+    /// Largest response body accepted, in bytes (default: 64 MiB)
+    #[serde(default = "default_max_response_bytes")]
+    pub max_response_bytes: usize,
+}
+
+fn default_max_response_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+/// Handling for API entries whose timestamp is missing or unparseable
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MissingTimestampAction {
+    /// Skip the entry (logged as a warning)
+    #[default]
+    Drop,
+    /// Ship the entry anyway; it may be re-shipped on later polls
+    Ship,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -227,6 +256,7 @@ pub struct DestinationConfig {
     pub host: Option<String>,     // Syslog server hostname
     pub port: Option<u16>,        // Syslog server port (default: 514)
     pub protocol: Option<String>, // "udp" or "tcp" (default: "udp")
+    pub framing: Option<String>,  // TCP framing: "newline" (default) or "octet-counting"
 
     // Elasticsearch destination fields
     pub url: Option<String>,   // Elasticsearch URL
@@ -239,13 +269,101 @@ pub struct DestinationConfig {
     pub bucket: Option<String>, // S3 bucket name
     pub prefix: Option<String>, // Optional key prefix (e.g., "logs/myapp/")
     pub region: Option<String>, // Optional AWS region
+
+    // Network timeouts (http, elasticsearch, syslog tcp, s3)
+    pub timeout_ms: Option<u64>, // Whole-request timeout (default: 30000)
+    pub connect_timeout_ms: Option<u64>, // Connection timeout (default: 10000)
 }
 
 impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let content = fs::read_to_string(path)?; // The '?' operator is "if err != nil { return err }"
-        let config = serde_yaml::from_str(&content)?;
+        let content = fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config {}: {}", path, e))?;
+        warn_if_world_readable(path);
+
+        // DESIGN CHOICE: Substitute ${...} references on the parsed YAML tree (string
+        // values only), so comments and YAML quoting don't interact with expansion.
+        let raw: serde_yaml::Value = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", path, e))?;
+        let expanded = expand_value(raw, &|name| std::env::var(name).ok())
+            .map_err(|e| anyhow::anyhow!("Config {}: {}", path, e))?;
+        let config: Self = serde_yaml::from_value(expanded)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", path, e))?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Check values that would otherwise panic or misbehave at runtime.
+    /// Reports every problem at once rather than the first.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let mut errors = Vec::new();
+
+        if self.log_files.is_empty()
+            && self.docker_containers.is_empty()
+            && self.api_sources.is_empty()
+        {
+            errors.push("no log_files, docker_containers or api_sources configured".to_string());
+        }
+
+        let sources = self
+            .log_files
+            .iter()
+            .map(|f| {
+                (
+                    format!("log file '{}'", f.path),
+                    f.path.is_empty(),
+                    f.polling_frequency_ms,
+                    f.buffer_size,
+                )
+            })
+            .chain(self.docker_containers.iter().map(|c| {
+                (
+                    format!("docker container '{}'", c.container),
+                    c.container.is_empty(),
+                    c.polling_frequency_ms,
+                    c.buffer_size,
+                )
+            }))
+            .chain(self.api_sources.iter().map(|a| {
+                (
+                    format!("api source '{}'", a.name),
+                    a.name.is_empty(),
+                    a.polling_frequency_ms,
+                    a.buffer_size,
+                )
+            }));
+        for (label, name_empty, polling_frequency_ms, buffer_size) in sources {
+            if name_empty {
+                errors.push(format!("{}: name/path must not be empty", label));
+            }
+            if polling_frequency_ms == 0 {
+                errors.push(format!("{}: polling_frequency_ms must be > 0", label));
+            }
+            if buffer_size == 0 {
+                errors.push(format!("{}: buffer_size must be > 0", label));
+            }
+        }
+
+        // API source names key the registry, so they must be unique
+        let mut seen = std::collections::HashSet::new();
+        for api in &self.api_sources {
+            if !seen.insert(&api.name) {
+                errors.push(format!("api source '{}': duplicate name", api.name));
+            }
+        }
+
+        if self.retry.max_queue_size == 0 {
+            errors.push(
+                "retry.max_queue_size must be > 0 (reading pauses while the queue is full)"
+                    .to_string(),
+            );
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("Invalid config:\n  - {}", errors.join("\n  - "))
+        }
     }
 
     #[cfg(test)]
@@ -255,7 +373,117 @@ impl Config {
     }
 }
 
+/// Warn when the config file can be read by any user, since it may hold secrets
+fn warn_if_world_readable(path: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path)
+            && meta.permissions().mode() & 0o004 != 0
+        {
+            eprintln!(
+                "Warning: config {} is world-readable; if it contains secrets, restrict it (chmod 600) or use ${{ENV_VAR}} / ${{file:/path}} references",
+                path
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Expand `${...}` references in every string value of a YAML tree
+fn expand_value(
+    value: serde_yaml::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<serde_yaml::Value> {
+    use serde_yaml::Value;
+    Ok(match value {
+        Value::String(s) => Value::String(expand_string(&s, lookup)?),
+        Value::Sequence(items) => Value::Sequence(
+            items
+                .into_iter()
+                .map(|v| expand_value(v, lookup))
+                .collect::<anyhow::Result<_>>()?,
+        ),
+        Value::Mapping(map) => Value::Mapping(
+            map.into_iter()
+                .map(|(k, v)| Ok((k, expand_value(v, lookup)?)))
+                .collect::<anyhow::Result<_>>()?,
+        ),
+        Value::Tagged(tagged) => {
+            let tagged = *tagged;
+            Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+                tag: tagged.tag,
+                value: expand_value(tagged.value, lookup)?,
+            }))
+        }
+        other => other,
+    })
+}
+
+/// Expand references in a config string, so secrets needn't be stored in the file:
+/// - `${VAR}` environment variable (error if unset)
+/// - `${VAR:-default}` environment variable with a default
+/// - `${file:/path}` contents of a file, trailing newline removed (e.g. Docker/k8s secrets)
+/// - `$${` a literal `${`
+fn expand_string(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(i) = rest.find('$') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(after) = rest.strip_prefix("$${") {
+            out.push_str("${");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("${") {
+            let end = after
+                .find('}')
+                .ok_or_else(|| anyhow::anyhow!("unterminated ${{ in \"{}\"", input))?;
+            let reference = &after[..end];
+            if let Some(file) = reference.strip_prefix("file:") {
+                let contents = fs::read_to_string(file)
+                    .map_err(|e| anyhow::anyhow!("failed to read secret file {}: {}", file, e))?;
+                out.push_str(contents.trim_end_matches(['\n', '\r']));
+            } else {
+                let (name, default) = match reference.split_once(":-") {
+                    Some((name, default)) => (name, Some(default)),
+                    None => (reference, None),
+                };
+                match (lookup(name), default) {
+                    (Some(v), _) => out.push_str(&v),
+                    (None, Some(d)) => out.push_str(d),
+                    (None, None) => anyhow::bail!("environment variable {} is not set", name),
+                }
+            }
+            rest = &after[end + 1..];
+        } else {
+            out.push('$');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Default whole-request timeout for network destinations
+const DEFAULT_DEST_TIMEOUT_MS: u64 = 30_000;
+/// Default connect timeout for network destinations
+const DEFAULT_DEST_CONNECT_TIMEOUT_MS: u64 = 10_000;
+
 impl DestinationConfig {
+    /// Whole-request timeout. DESIGN CHOICE: always bounded, so a hung endpoint
+    /// can't stall a source's poll loop forever.
+    pub fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms.unwrap_or(DEFAULT_DEST_TIMEOUT_MS))
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(
+            self.connect_timeout_ms
+                .unwrap_or(DEFAULT_DEST_CONNECT_TIMEOUT_MS),
+        )
+    }
+
     pub fn has_auth(&self) -> bool {
         let has_api = self.api_key.as_ref().is_some_and(|k| !k.is_empty());
         let has_basic = self.basic.is_some();
@@ -354,6 +582,32 @@ log_files:
         assert_eq!(dest.api_key.as_ref().unwrap(), "secret123");
         assert_eq!(dest.basic.as_ref().unwrap().username, "user");
         assert_eq!(dest.basic.as_ref().unwrap().password, "password");
+    }
+
+    #[test]
+    fn test_destination_timeouts() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/a.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+  - path: "/var/log/b.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+      timeout_ms: 5000
+      connect_timeout_ms: 1000
+        "#;
+        let config = Config::from_yaml(yaml).unwrap();
+        let defaults = &config.log_files[0].destination;
+        assert_eq!(defaults.request_timeout(), Duration::from_secs(30));
+        assert_eq!(defaults.connect_timeout(), Duration::from_secs(10));
+        let custom = &config.log_files[1].destination;
+        assert_eq!(custom.request_timeout(), Duration::from_secs(5));
+        assert_eq!(custom.connect_timeout(), Duration::from_secs(1));
     }
 
     #[test]
@@ -632,5 +886,119 @@ log_files:
 
         let config = Config::from_yaml(yaml).unwrap();
         assert!(!config.log_files[0].masking.enabled);
+    }
+
+    #[test]
+    fn test_validate_accepts_minimal_config() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "file"
+      path: "/tmp/out.log"
+        "#;
+        assert!(Config::from_yaml(yaml).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_values() {
+        let yaml = r#"
+retry:
+  max_queue_size: 0
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 0
+    buffer_size: 0
+    destination:
+      type: "file"
+      path: "/tmp/out.log"
+api_sources:
+  - name: dup
+    endpoint: "http://localhost"
+    polling_frequency_ms: 1000
+    results_field: data
+    timestamp_field: ts
+    destination: { type: file, path: /tmp/a }
+  - name: dup
+    endpoint: "http://localhost"
+    polling_frequency_ms: 1000
+    results_field: data
+    timestamp_field: ts
+    destination: { type: file, path: /tmp/a }
+        "#;
+        let err = Config::from_yaml(yaml)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("polling_frequency_ms must be > 0"), "{}", err);
+        assert!(err.contains("buffer_size must be > 0"), "{}", err);
+        assert!(err.contains("duplicate name"), "{}", err);
+        assert!(err.contains("max_queue_size"), "{}", err);
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_config() {
+        let err = Config::from_yaml("{}")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no log_files"), "{}", err);
+    }
+
+    fn lookup(name: &str) -> Option<String> {
+        match name {
+            "API_KEY" => Some("s3cret".to_string()),
+            "EMPTY" => Some(String::new()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_expand_string() {
+        assert_eq!(expand_string("${API_KEY}", &lookup).unwrap(), "s3cret");
+        assert_eq!(
+            expand_string("Bearer ${API_KEY}!", &lookup).unwrap(),
+            "Bearer s3cret!"
+        );
+        assert_eq!(expand_string("${MISSING:-dflt}", &lookup).unwrap(), "dflt");
+        assert_eq!(expand_string("${EMPTY:-dflt}", &lookup).unwrap(), "");
+        assert_eq!(
+            expand_string("cost $5 $${X}", &lookup).unwrap(),
+            "cost $5 ${X}"
+        );
+        assert!(expand_string("${MISSING}", &lookup).is_err());
+        assert!(expand_string("${API_KEY", &lookup).is_err());
+    }
+
+    #[test]
+    fn test_expand_secret_file() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        writeln!(file, "from-file").unwrap();
+        let input = format!("${{file:{}}}", file.path().display());
+        assert_eq!(expand_string(&input, &lookup).unwrap(), "from-file");
+    }
+
+    #[test]
+    fn test_expand_config_tree() {
+        let yaml = r#"
+# comment with ${NOT_SET} is ignored
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+      api_key: "${API_KEY}"
+"#;
+        let raw: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = serde_yaml::from_value(expand_value(raw, &lookup).unwrap()).unwrap();
+        assert_eq!(
+            config.log_files[0].destination.api_key.as_deref(),
+            Some("s3cret")
+        );
     }
 }
