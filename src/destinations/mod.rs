@@ -117,6 +117,11 @@ pub(crate) fn build_http_client(
 
         // Optionally disable certificate verification (dangerous, but sometimes needed for testing)
         if tls_config.accept_invalid_certs.unwrap_or(false) {
+            eprintln!(
+                "WARNING: {} destination has tls.accept_invalid_certs enabled. Server certificates \
+                 are NOT verified; traffic can be intercepted. Use only for testing.",
+                kind
+            );
             client_builder = client_builder.danger_accept_invalid_certs(true);
         }
 

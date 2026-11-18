@@ -164,6 +164,14 @@ pub struct ApiSourceConfig {
     pub time_filter_param: Option<String>, // Query param for filtering by time (e.g., "since", "start_time")
     #[serde(default)]
     pub time_filter_format: Option<String>, // Time format: "unix", "unix_ms", "rfc3339" (default: "rfc3339")
+
+    /// Largest response body accepted, in bytes (default: 64 MiB)
+    #[serde(default = "default_max_response_bytes")]
+    pub max_response_bytes: usize,
+}
+
+fn default_max_response_bytes() -> usize {
+    64 * 1024 * 1024
 }
 
 /// Handling for API entries whose timestamp is missing or unparseable
@@ -270,7 +278,15 @@ impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config {}: {}", path, e))?;
-        let config: Self = serde_yaml::from_str(&content)
+        warn_if_world_readable(path);
+
+        // DESIGN CHOICE: Substitute ${...} references on the parsed YAML tree (string
+        // values only), so comments and YAML quoting don't interact with expansion.
+        let raw: serde_yaml::Value = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", path, e))?;
+        let expanded = expand_value(raw, &|name| std::env::var(name).ok())
+            .map_err(|e| anyhow::anyhow!("Config {}: {}", path, e))?;
+        let config: Self = serde_yaml::from_value(expanded)
             .map_err(|e| anyhow::anyhow!("Failed to parse config {}: {}", path, e))?;
         config.validate()?;
         Ok(config)
@@ -354,6 +370,98 @@ impl Config {
         let config = serde_yaml::from_str(yaml)?;
         Ok(config)
     }
+}
+
+/// Warn when the config file can be read by any user, since it may hold secrets
+fn warn_if_world_readable(path: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(path)
+            && meta.permissions().mode() & 0o004 != 0
+        {
+            eprintln!(
+                "Warning: config {} is world-readable; if it contains secrets, restrict it (chmod 600) or use ${{ENV_VAR}} / ${{file:/path}} references",
+                path
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Expand `${...}` references in every string value of a YAML tree
+fn expand_value(
+    value: serde_yaml::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<serde_yaml::Value> {
+    use serde_yaml::Value;
+    Ok(match value {
+        Value::String(s) => Value::String(expand_string(&s, lookup)?),
+        Value::Sequence(items) => Value::Sequence(
+            items
+                .into_iter()
+                .map(|v| expand_value(v, lookup))
+                .collect::<anyhow::Result<_>>()?,
+        ),
+        Value::Mapping(map) => Value::Mapping(
+            map.into_iter()
+                .map(|(k, v)| Ok((k, expand_value(v, lookup)?)))
+                .collect::<anyhow::Result<_>>()?,
+        ),
+        Value::Tagged(tagged) => {
+            let tagged = *tagged;
+            Value::Tagged(Box::new(serde_yaml::value::TaggedValue {
+                tag: tagged.tag,
+                value: expand_value(tagged.value, lookup)?,
+            }))
+        }
+        other => other,
+    })
+}
+
+/// Expand references in a config string, so secrets needn't be stored in the file:
+/// - `${VAR}` environment variable (error if unset)
+/// - `${VAR:-default}` environment variable with a default
+/// - `${file:/path}` contents of a file, trailing newline removed (e.g. Docker/k8s secrets)
+/// - `$${` a literal `${`
+fn expand_string(input: &str, lookup: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<String> {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(i) = rest.find('$') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(after) = rest.strip_prefix("$${") {
+            out.push_str("${");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("${") {
+            let end = after
+                .find('}')
+                .ok_or_else(|| anyhow::anyhow!("unterminated ${{ in \"{}\"", input))?;
+            let reference = &after[..end];
+            if let Some(file) = reference.strip_prefix("file:") {
+                let contents = fs::read_to_string(file)
+                    .map_err(|e| anyhow::anyhow!("failed to read secret file {}: {}", file, e))?;
+                out.push_str(contents.trim_end_matches(['\n', '\r']));
+            } else {
+                let (name, default) = match reference.split_once(":-") {
+                    Some((name, default)) => (name, Some(default)),
+                    None => (reference, None),
+                };
+                match (lookup(name), default) {
+                    (Some(v), _) => out.push_str(&v),
+                    (None, Some(d)) => out.push_str(d),
+                    (None, None) => anyhow::bail!("environment variable {} is not set", name),
+                }
+            }
+            rest = &after[end + 1..];
+        } else {
+            out.push('$');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// Default whole-request timeout for network destinations
@@ -837,5 +945,59 @@ api_sources:
             .unwrap_err()
             .to_string();
         assert!(err.contains("no log_files"), "{}", err);
+    }
+
+    fn lookup(name: &str) -> Option<String> {
+        match name {
+            "API_KEY" => Some("s3cret".to_string()),
+            "EMPTY" => Some(String::new()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_expand_string() {
+        assert_eq!(expand_string("${API_KEY}", &lookup).unwrap(), "s3cret");
+        assert_eq!(
+            expand_string("Bearer ${API_KEY}!", &lookup).unwrap(),
+            "Bearer s3cret!"
+        );
+        assert_eq!(expand_string("${MISSING:-dflt}", &lookup).unwrap(), "dflt");
+        assert_eq!(expand_string("${EMPTY:-dflt}", &lookup).unwrap(), "");
+        assert_eq!(
+            expand_string("cost $5 $${X}", &lookup).unwrap(),
+            "cost $5 ${X}"
+        );
+        assert!(expand_string("${MISSING}", &lookup).is_err());
+        assert!(expand_string("${API_KEY", &lookup).is_err());
+    }
+
+    #[test]
+    fn test_expand_secret_file() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        writeln!(file, "from-file").unwrap();
+        let input = format!("${{file:{}}}", file.path().display());
+        assert_eq!(expand_string(&input, &lookup).unwrap(), "from-file");
+    }
+
+    #[test]
+    fn test_expand_config_tree() {
+        let yaml = r#"
+# comment with ${NOT_SET} is ignored
+log_files:
+  - path: "/var/log/test.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+      api_key: "${API_KEY}"
+"#;
+        let raw: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = serde_yaml::from_value(expand_value(raw, &lookup).unwrap()).unwrap();
+        assert_eq!(
+            config.log_files[0].destination.api_key.as_deref(),
+            Some("s3cret")
+        );
     }
 }

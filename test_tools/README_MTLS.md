@@ -32,7 +32,7 @@ This script will:
 ./test_tools/generate-test-certs.sh
 ```
 
-This creates:
+This creates the following (git-ignored; never commit them):
 - `test_tools/certs/ca.crt` - CA certificate
 - `test_tools/certs/ca.key` - CA private key
 - `test_tools/certs/server.crt` - Server certificate

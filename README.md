@@ -139,7 +139,25 @@ The binary will be at `./target/release/flicker`.
 
 ## Configuration
 
-Flicker uses YAML configuration. Create a `flicker.yaml` file:
+Flicker uses YAML configuration. Create a `flicker.yaml` file.
+
+**Keeping secrets out of the file:** any string value can reference the environment
+or a file instead of holding a secret literally:
+
+- `${VAR}` - environment variable (startup fails if it isn't set)
+- `${VAR:-default}` - environment variable with a fallback
+- `${file:/run/secrets/api_key}` - file contents, trailing newline removed (Docker/Kubernetes secrets)
+- `$${` - a literal `${`
+
+```yaml
+destination:
+  type: "http"
+  endpoint: "https://logs.example.com/ingest"
+  api_key: "${LOG_API_KEY}"
+```
+
+Flicker warns at startup if the config file is world-readable.
+
 
 ```yaml
 # Optional: Global retry configuration (these are the defaults)
@@ -439,6 +457,7 @@ Array of API source configurations for pulling audit logs from REST APIs. Each e
 **Time Filtering:**
 - **`time_filter_param`** (string, optional): Query parameter for filtering by time (e.g., "since", "start_time")
 - **`time_filter_format`** (string, optional): Time format: "unix", "unix_ms", or "rfc3339" (default: "rfc3339")
+- **`max_response_bytes`** (integer, optional, default: 67108864): Largest API response accepted; larger responses fail the poll
 
 **Pagination (optional):**
 - **`pagination`** (object, optional): Pagination configuration

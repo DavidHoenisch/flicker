@@ -199,10 +199,9 @@ impl ApiTailer {
                 ));
             }
 
-            let body: Value = response
-                .json()
-                .await
-                .context("Failed to parse JSON response")?;
+            let bytes = read_body_capped(response, config.max_response_bytes).await?;
+            let body: Value =
+                serde_json::from_slice(&bytes).context("Failed to parse JSON response")?;
 
             // Extract log entries from response
             let entries = self.extract_entries(&body, config)?;
@@ -422,6 +421,35 @@ impl ApiTailer {
     }
 }
 
+/// Read a response body, failing once it exceeds `max_bytes`.
+/// DESIGN CHOICE: A misbehaving or malicious endpoint can't exhaust memory.
+async fn read_body_capped(mut response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let too_large = || {
+        anyhow!(
+            "API response exceeds max_response_bytes ({} bytes); reduce page_size or raise the limit",
+            max_bytes
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|len| len > max_bytes as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read API response")?
+    {
+        if body.len() + chunk.len() > max_bytes {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 /// Convert a dotted field path ("a.b.c") to a JSON pointer ("/a/b/c")
 fn json_pointer(field: &str) -> String {
     format!("/{}", field.replace('.', "/"))
@@ -604,6 +632,23 @@ pagination:
         let lines = texts(tailer.poll(&config).await.unwrap());
         assert_eq!(lines, vec!["a"]);
         assert_eq!(queries.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_oversized_response_rejected() {
+        let (url, _) = mock_api(|_| {
+            format!(
+                r#"{{"data":[{{"ts":"2030-01-01T00:00:00Z","msg":"{}"}}],"next":null}}"#,
+                "x".repeat(2000)
+            )
+        })
+        .await;
+        let mut config = api_config(&url, CURSOR_PAGINATION);
+        config.max_response_bytes = 1000;
+        let mut tailer = primed_tailer(&config).await;
+
+        let err = tailer.poll(&config).await.unwrap_err().to_string();
+        assert!(err.contains("max_response_bytes"), "{}", err);
     }
 
     #[tokio::test]
