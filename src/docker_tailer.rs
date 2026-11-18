@@ -2,11 +2,42 @@ use crate::registry::RegistryUpdate;
 use bollard::Docker;
 use bollard::container::LogsOptions;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 /// Tracks state for a single container being tailed
+#[derive(Clone, Default)]
 struct ContainerState {
     last_timestamp: Option<DateTime<Utc>>,
+    /// Hashes of lines already shipped at exactly `last_timestamp`
+    boundary: HashSet<u64>,
+}
+
+impl ContainerState {
+    /// Decide whether a line is new, updating the position if so.
+    ///
+    /// DESIGN CHOICE: Docker's `since` filter has one-second resolution, so each
+    /// poll re-returns lines from the last second. Lines must arrive in timestamp
+    /// order (as Docker returns them); anything older than the last shipped line,
+    /// or identical to a line already shipped at that exact timestamp, is a repeat.
+    fn admit(&mut self, timestamp: DateTime<Utc>, content: &str) -> bool {
+        let hash = {
+            let mut h = DefaultHasher::new();
+            content.hash(&mut h);
+            h.finish()
+        };
+        match self.last_timestamp {
+            Some(last) if timestamp < last => false,
+            Some(last) if timestamp == last => self.boundary.insert(hash),
+            _ => {
+                self.last_timestamp = Some(timestamp);
+                self.boundary.clear();
+                self.boundary.insert(hash);
+                true
+            }
+        }
+    }
 }
 
 /// Manages tailing multiple Docker containers
@@ -74,12 +105,14 @@ impl DockerTailer {
                 container.to_string(),
                 ContainerState {
                     last_timestamp: initial_timestamp,
+                    boundary: HashSet::new(),
                 },
             );
             return Ok(lines); // Return empty on first poll (similar to file tailer)
         }
 
-        let state = self.containers.get_mut(container).unwrap();
+        // Work on a copy so a mid-stream error doesn't advance the position
+        let mut state = self.containers.get(container).unwrap().clone();
 
         // Build log options
         let mut options = LogsOptions::<String> {
@@ -99,8 +132,6 @@ impl DockerTailer {
         // Fetch logs from Docker
         let mut stream = self.docker.logs(container, Some(options));
 
-        let mut latest_timestamp = state.last_timestamp;
-
         // Process log stream
         while let Some(log_result) = stream.next().await {
             match log_result {
@@ -108,21 +139,19 @@ impl DockerTailer {
                     let log_str = log_output.to_string();
 
                     // Docker log format: "timestamp log_content"
-                    // We need to parse the timestamp and extract just the content
-                    if let Some((timestamp_str, content)) = log_str.split_once(' ') {
-                        // Parse timestamp to track our position
-                        if let Ok(timestamp) = timestamp_str.parse::<DateTime<Utc>>() {
-                            // Update latest timestamp
-                            if latest_timestamp.is_none() || timestamp > latest_timestamp.unwrap() {
-                                latest_timestamp = Some(timestamp);
+                    // DESIGN CHOICE: Only strip the line terminator; leading whitespace
+                    // matters for indented output like stack traces.
+                    let log_str = log_str.trim_end_matches(['\n', '\r']);
+                    match log_str.split_once(' ').and_then(|(ts, content)| {
+                        Some((ts.parse::<DateTime<Utc>>().ok()?, content))
+                    }) {
+                        Some((timestamp, content)) => {
+                            if state.admit(timestamp, content) {
+                                lines.push(content.to_string());
                             }
                         }
-
-                        // Add the content (without timestamp prefix)
-                        lines.push(content.trim().to_string());
-                    } else {
                         // No timestamp found, just use the whole line
-                        lines.push(log_str.trim().to_string());
+                        None => lines.push(log_str.to_string()),
                     }
                 }
                 Err(e) => {
@@ -133,8 +162,7 @@ impl DockerTailer {
             }
         }
 
-        // Update state with latest timestamp
-        state.last_timestamp = latest_timestamp;
+        self.containers.insert(container.to_string(), state);
 
         Ok(lines)
     }
@@ -143,6 +171,33 @@ impl DockerTailer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn test_admit_skips_repeats_from_rounded_since() {
+        let mut state = ContainerState::default();
+        assert!(state.admit(ts("2030-01-01T00:00:00.100Z"), "a"));
+        assert!(state.admit(ts("2030-01-01T00:00:00.200Z"), "b"));
+
+        // Next poll: since= rounds down, Docker re-returns both lines plus a new one
+        assert!(!state.admit(ts("2030-01-01T00:00:00.100Z"), "a"));
+        assert!(!state.admit(ts("2030-01-01T00:00:00.200Z"), "b"));
+        assert!(state.admit(ts("2030-01-01T00:00:00.300Z"), "c"));
+    }
+
+    #[test]
+    fn test_admit_keeps_distinct_lines_with_same_timestamp() {
+        let mut state = ContainerState::default();
+        let t = ts("2030-01-01T00:00:00Z");
+        assert!(state.admit(t, "a"));
+        assert!(state.admit(t, "b"));
+        // Re-fetched on the next poll
+        assert!(!state.admit(t, "a"));
+        assert!(!state.admit(t, "b"));
+    }
 
     // NOTE: These tests require Docker to be running
     // They are integration tests and may be skipped in CI environments
