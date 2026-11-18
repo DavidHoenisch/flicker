@@ -90,18 +90,20 @@ impl LogTailer {
 
             // DESIGN CHOICE: Read line-by-line instead of bulk read
             // This ensures we always send complete lines, never partial
-            let mut line = String::new();
-            while state.reader.read_line(&mut line)? > 0 {
+            // DESIGN CHOICE: Read raw bytes and decode lossily. read_line() errors on
+            // invalid UTF-8, which would leave position stuck before the bad byte forever.
+            let mut buf = Vec::new();
+            while state.reader.read_until(b'\n', &mut buf)? > 0 {
                 // Remove trailing newline
-                if line.ends_with('\n') {
-                    line.pop();
-                    if line.ends_with('\r') {
-                        line.pop();
+                if buf.ends_with(b"\n") {
+                    buf.pop();
+                    if buf.ends_with(b"\r") {
+                        buf.pop();
                     }
                 }
 
-                lines.push(line.clone());
-                line.clear();
+                lines.push(String::from_utf8_lossy(&buf).into_owned());
+                buf.clear();
             }
 
             // Update position after reading
@@ -278,6 +280,30 @@ mod tests {
         assert_eq!(lines1[0], "File1 Line1");
         assert_eq!(lines2.len(), 1);
         assert_eq!(lines2[0], "File2 Line1");
+    }
+
+    #[test]
+    fn test_tailer_handles_invalid_utf8() {
+        let mut file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+
+        let mut tailer = LogTailer::new();
+        tailer.poll(&path).unwrap();
+
+        file.write_all(b"good1\nbad\xff\ngood2\n").unwrap();
+        file.flush().unwrap();
+
+        let lines = tailer.poll(&path).unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "good1");
+        assert_eq!(lines[1], "bad\u{FFFD}");
+        assert_eq!(lines[2], "good2");
+
+        // Position advanced past the bad byte
+        writeln!(file, "good3").unwrap();
+        file.flush().unwrap();
+        let lines = tailer.poll(&path).unwrap();
+        assert_eq!(lines, vec!["good3"]);
     }
 
     #[test]
