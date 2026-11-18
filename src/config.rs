@@ -1,6 +1,7 @@
 use crate::masking::MaskingConfig;
 use serde::Deserialize;
 use std::fs;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RetryConfigOptions {
@@ -239,6 +240,10 @@ pub struct DestinationConfig {
     pub bucket: Option<String>, // S3 bucket name
     pub prefix: Option<String>, // Optional key prefix (e.g., "logs/myapp/")
     pub region: Option<String>, // Optional AWS region
+
+    // Network timeouts (http, elasticsearch, syslog tcp, s3)
+    pub timeout_ms: Option<u64>, // Whole-request timeout (default: 30000)
+    pub connect_timeout_ms: Option<u64>, // Connection timeout (default: 10000)
 }
 
 impl Config {
@@ -255,7 +260,25 @@ impl Config {
     }
 }
 
+/// Default whole-request timeout for network destinations
+const DEFAULT_DEST_TIMEOUT_MS: u64 = 30_000;
+/// Default connect timeout for network destinations
+const DEFAULT_DEST_CONNECT_TIMEOUT_MS: u64 = 10_000;
+
 impl DestinationConfig {
+    /// Whole-request timeout. DESIGN CHOICE: always bounded, so a hung endpoint
+    /// can't stall a source's poll loop forever.
+    pub fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms.unwrap_or(DEFAULT_DEST_TIMEOUT_MS))
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_millis(
+            self.connect_timeout_ms
+                .unwrap_or(DEFAULT_DEST_CONNECT_TIMEOUT_MS),
+        )
+    }
+
     pub fn has_auth(&self) -> bool {
         let has_api = self.api_key.as_ref().is_some_and(|k| !k.is_empty());
         let has_basic = self.basic.is_some();
@@ -354,6 +377,32 @@ log_files:
         assert_eq!(dest.api_key.as_ref().unwrap(), "secret123");
         assert_eq!(dest.basic.as_ref().unwrap().username, "user");
         assert_eq!(dest.basic.as_ref().unwrap().password, "password");
+    }
+
+    #[test]
+    fn test_destination_timeouts() {
+        let yaml = r#"
+log_files:
+  - path: "/var/log/a.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+  - path: "/var/log/b.log"
+    polling_frequency_ms: 500
+    destination:
+      type: "http"
+      endpoint: "http://localhost:8000/ingest"
+      timeout_ms: 5000
+      connect_timeout_ms: 1000
+        "#;
+        let config = Config::from_yaml(yaml).unwrap();
+        let defaults = &config.log_files[0].destination;
+        assert_eq!(defaults.request_timeout(), Duration::from_secs(30));
+        assert_eq!(defaults.connect_timeout(), Duration::from_secs(10));
+        let custom = &config.log_files[1].destination;
+        assert_eq!(custom.request_timeout(), Duration::from_secs(5));
+        assert_eq!(custom.connect_timeout(), Duration::from_secs(1));
     }
 
     #[test]

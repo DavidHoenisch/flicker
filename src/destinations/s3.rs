@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use aws_sdk_s3::Client;
 use chrono::Utc;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -28,6 +29,8 @@ pub struct S3Destination {
     bucket: String,
     prefix: String,
     region: Option<String>,
+    timeout: Duration,
+    connect_timeout: Duration,
 }
 
 impl S3Destination {
@@ -51,6 +54,8 @@ impl S3Destination {
             bucket,
             prefix,
             region: config.region.clone(),
+            timeout: config.request_timeout(),
+            connect_timeout: config.connect_timeout(),
         })
     }
 
@@ -71,7 +76,12 @@ impl S3Destination {
 
         let config = config_loader.load().await;
 
-        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&config);
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&config).timeout_config(
+            aws_config::timeout::TimeoutConfig::builder()
+                .operation_timeout(self.timeout)
+                .connect_timeout(self.connect_timeout)
+                .build(),
+        );
 
         // Support custom endpoints for S3-compatible services
         if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
@@ -170,6 +180,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = S3Destination::new(&config);
@@ -199,6 +211,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: Some("my-prefix".to_string()),
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = S3Destination::new(&config);
@@ -228,6 +242,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: Some("my-prefix".to_string()),
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = S3Destination::new(&config);
@@ -255,6 +271,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: Some("my-prefix/".to_string()),
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = S3Destination::new(&config);
@@ -282,6 +300,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: Some("".to_string()),
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = S3Destination::new(&config);
@@ -309,6 +329,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: None,
             region: Some("us-west-2".to_string()),
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = S3Destination::new(&config);
@@ -336,6 +358,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = S3Destination::new(&config);
@@ -363,6 +387,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: Some("my-prefix".to_string()),
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();
@@ -394,6 +420,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();
@@ -425,6 +453,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: Some("".to_string()),
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();
@@ -455,6 +485,8 @@ mod tests {
             bucket: Some("test-bucket".to_string()),
             prefix: Some("my-prefix".to_string()),
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let dest = S3Destination::new(&config).unwrap();

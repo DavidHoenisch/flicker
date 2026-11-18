@@ -16,6 +16,9 @@ log_files:
       basic:
         username: "flicker"
         password: "your_secret_password"
+      # Optional: network timeouts (http, elasticsearch, syslog tcp, s3)
+      # timeout_ms: 30000         # Whole-request timeout (default: 30000)
+      # connect_timeout_ms: 10000 # Connect timeout (default: 10000)
 
   - path: "/var/log/auth.log"
     polling_frequency_ms: 500  # Poll less frequently

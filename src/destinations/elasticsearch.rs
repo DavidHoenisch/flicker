@@ -15,6 +15,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Serialize;
+use std::time::Duration;
 
 pub struct ElasticsearchDestination {
     client: reqwest::Client,
@@ -43,12 +44,21 @@ struct ElasticsearchDocument {
 }
 
 impl ElasticsearchDestination {
-    pub fn new(url: String, index: String) -> Self {
-        Self {
-            client: reqwest::Client::new(),
+    pub fn new(
+        url: String,
+        index: String,
+        timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(connect_timeout)
+            .build()?;
+        Ok(Self {
+            client,
             url: url.trim_end_matches('/').to_string(),
             index,
-        }
+        })
     }
 
     /// Build Elasticsearch bulk API request body (NDJSON format)

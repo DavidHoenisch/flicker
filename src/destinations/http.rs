@@ -47,7 +47,10 @@ impl HttpDestination {
             headers.insert(AUTHORIZATION, auth_value);
         }
 
-        let mut client_builder = reqwest::Client::builder().default_headers(headers);
+        let mut client_builder = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(config.request_timeout())
+            .connect_timeout(config.connect_timeout());
 
         // Configure TLS/mTLS if specified
         if let Some(tls_config) = &config.tls {
@@ -167,5 +170,41 @@ impl Destination for HttpDestination {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn test_http_destination_times_out_on_hung_endpoint() {
+        // Accept connections but never respond
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let config: DestinationConfig = serde_yaml::from_str(&format!(
+            "type: http\nendpoint: http://{}/\ntimeout_ms: 200\n",
+            addr
+        ))
+        .unwrap();
+        let dest = HttpDestination::new(&config).unwrap();
+
+        let start = Instant::now();
+        let result = dest
+            .send_batch(vec![LogEntry {
+                path: "/test.log".to_string(),
+                line: "hello".to_string(),
+            }])
+            .await;
+        assert!(result.is_err());
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 }

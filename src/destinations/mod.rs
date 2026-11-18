@@ -49,7 +49,11 @@ pub fn create_destination(
             let port = config.port.unwrap_or(514);
             let protocol = config.protocol.as_deref().unwrap_or("udp");
             Ok(Box::new(syslog::SyslogDestination::new(
-                host, port, protocol,
+                host,
+                port,
+                protocol,
+                config.request_timeout(),
+                config.connect_timeout(),
             )?))
         }
         "elasticsearch" => {
@@ -61,8 +65,11 @@ pub fn create_destination(
                 anyhow::anyhow!("Elasticsearch destination requires 'index' field")
             })?;
             Ok(Box::new(elasticsearch::ElasticsearchDestination::new(
-                url, index,
-            )))
+                url,
+                index,
+                config.request_timeout(),
+                config.connect_timeout(),
+            )?))
         }
         "file" => {
             let path = config
@@ -102,6 +109,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -127,6 +136,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -154,6 +165,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -179,6 +192,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -204,6 +219,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -229,6 +246,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -254,6 +273,8 @@ mod tests {
             bucket: Some("my-log-bucket".to_string()),
             prefix: Some("logs/app/".to_string()),
             region: Some("us-west-2".to_string()),
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -279,6 +300,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -306,6 +329,8 @@ mod tests {
             bucket: Some("my-bucket".to_string()),
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -331,6 +356,8 @@ mod tests {
             bucket: Some("my-bucket".to_string()),
             prefix: Some("logs/".to_string()),
             region: Some("us-east-1".to_string()),
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);
@@ -356,6 +383,8 @@ mod tests {
             bucket: None,
             prefix: None,
             region: None,
+            timeout_ms: None,
+            connect_timeout_ms: None,
         };
 
         let result = create_destination(&config);

@@ -14,11 +14,14 @@ use chrono::Local;
 use std::io::Write;
 use std::net::TcpStream;
 use std::net::{ToSocketAddrs, UdpSocket};
+use std::time::Duration;
 
 pub struct SyslogDestination {
     host: String,
     port: u16,
     protocol: SyslogProtocol,
+    timeout: Duration,
+    connect_timeout: Duration,
     // DESIGN CHOICE: Use blocking I/O for syslog
     // Syslog is fire-and-forget (UDP) or simple (TCP), so blocking is fine
     // and simpler than async sockets for this use case
@@ -31,7 +34,13 @@ enum SyslogProtocol {
 }
 
 impl SyslogDestination {
-    pub fn new(host: String, port: u16, protocol: &str) -> Result<Self> {
+    pub fn new(
+        host: String,
+        port: u16,
+        protocol: &str,
+        timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<Self> {
         let protocol = match protocol.to_lowercase().as_str() {
             "udp" => SyslogProtocol::Udp,
             "tcp" => SyslogProtocol::Tcp,
@@ -42,6 +51,8 @@ impl SyslogDestination {
             host,
             port,
             protocol,
+            timeout,
+            connect_timeout,
         })
     }
 
@@ -80,19 +91,13 @@ impl SyslogDestination {
 
     #[allow(dead_code)]
     fn send_tcp(&self, messages: &[String]) -> Result<()> {
-        let addr = format!("{}:{}", self.host, self.port);
-        let mut stream = TcpStream::connect(&addr)?;
-
-        // DESIGN CHOICE: Send all messages in one connection
-        // More efficient than reconnecting for each message
-        for message in messages {
-            // RFC 6587: Newline-delimited messages
-            stream.write_all(message.as_bytes())?;
-            stream.write_all(b"\n")?;
-        }
-
-        stream.flush()?;
-        Ok(())
+        send_tcp(
+            &self.host,
+            self.port,
+            self.timeout,
+            self.connect_timeout,
+            messages,
+        )
     }
 }
 
@@ -130,6 +135,8 @@ impl Destination for SyslogDestination {
         let host = self.host.clone();
         let port = self.port;
         let protocol = self.protocol;
+        let timeout = self.timeout;
+        let connect_timeout = self.connect_timeout;
 
         tokio::task::spawn_blocking(move || {
             match protocol {
@@ -145,15 +152,7 @@ impl Destination for SyslogDestination {
                     }
                 }
                 SyslogProtocol::Tcp => {
-                    let addr = format!("{}:{}", host, port);
-                    let mut stream = TcpStream::connect(&addr)?;
-
-                    for message in &messages {
-                        stream.write_all(message.as_bytes())?;
-                        stream.write_all(b"\n")?;
-                    }
-
-                    stream.flush()?;
+                    send_tcp(&host, port, timeout, connect_timeout, &messages)?;
                 }
             }
             Ok::<(), anyhow::Error>(())
@@ -164,4 +163,45 @@ impl Destination for SyslogDestination {
 
         Ok(())
     }
+}
+
+/// Send messages over one TCP connection with bounded connect/write times.
+/// DESIGN CHOICE: Timeouts keep a hung server from pinning a blocking thread
+/// (and the source's poll loop) forever.
+fn send_tcp(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    connect_timeout: Duration,
+    messages: &[String],
+) -> Result<()> {
+    let mut last_err = None;
+    let mut stream = None;
+    for addr in (host, port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, connect_timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let mut stream = match (stream, last_err) {
+        (Some(s), _) => s,
+        (None, Some(e)) => return Err(e.into()),
+        (None, None) => anyhow::bail!("Failed to resolve syslog address"),
+    };
+    stream.set_write_timeout(Some(timeout))?;
+    stream.set_read_timeout(Some(timeout))?;
+
+    // DESIGN CHOICE: Send all messages in one connection
+    // More efficient than reconnecting for each message
+    for message in messages {
+        // RFC 6587: Newline-delimited messages
+        stream.write_all(message.as_bytes())?;
+        stream.write_all(b"\n")?;
+    }
+
+    stream.flush()?;
+    Ok(())
 }
